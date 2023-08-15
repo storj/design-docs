@@ -58,7 +58,8 @@ satellite for managing users' accounts.
 Back office has a fixed set of access levels. Every access level is associated with a list of
 groups. Users are authorized to specific access level depending to the groups they belong.
 
-Back office keeps an audit trail of all performed operations.
+Back office keeps a modification history of all performed operations that altered the data (create,
+update,and delete).
 
 Back office can operates without relying in any resource managed by Storj. Any satellite operator
 with or without any relation with Storj will be able to use it.
@@ -291,7 +292,7 @@ __When a user wants to change the email address tied to their account__
 I want to be able to edit the email address in the account details view so that all events and data
 associated to that user is now under the updated email address.
 
-##### Audit trail
+##### Modifications history
 
 The back office keeps a register of all performed operations and who executed them that cause
 modifications.
@@ -313,7 +314,7 @@ This information is stored in the same database that the satellite uses.
 The _DBX_ schema is
 
 ```
-model admin_operation_audit_trail (
+model admin_operation_modifications_history (
     key id
 
     index (
@@ -349,41 +350,41 @@ model admin_operation_audit_trail (
     // For example delete and account implies to delete all its projects, so
     // if a project is deleted because of an account deletion, the delete
     // project operation reference the account deletion operation.
-    field caused_by         admin_operation_audit_trail.id (nullable, updatable)
+    field caused_by         admin_operation_modifications_history.id (nullable, updatable)
 )
 
-create admin_operation_audit_trail ( )
+create admin_operation_modifications_history ( )
 
 read paged (
-    select admin_operation_audit_trail.performed_at admin_operation_audit_trail.operator_email admin_operation_audit_trail.account_id admin_operation_audit_trail.entity_name admin_operation_audit_trail.entity_id admin_operation_audit_trail.current_data admin_operation_audit_trail.previous_data
-    where admin_operation_audit_trail.account_id = ?
-    orderby desc admin_operation_audit_trail.performed_at
+    select admin_operation_modifications_history.performed_at admin_operation_modifications_history.operator_email admin_operation_modifications_history.account_id admin_operation_modifications_history.entity_name admin_operation_modifications_history.entity_id admin_operation_modifications_history.current_data admin_operation_modifications_history.previous_data
+    where admin_operation_modifications_history.account_id = ?
+    orderby desc admin_operation_modifications_history.performed_at
     suffix ReadLastOperationsOnAccount
 )
 
 read paged (
-    select admin_operation_audit_trail.performed_at admin_operation_audit_trail.operator_email admin_operation_audit_trail.account_id admin_operation_audit_trail.entity_name admin_operation_audit_trail.entity_id admin_operation_audit_trail.current_data admin_operation_audit_trail.previous_data
-    where admin_operation_audit_trail.account_id = ?
-    where  admin_operation_audit_trail.entity_name = ?
-    orderby desc admin_operation_audit_trail.performed_at
+    select admin_operation_modifications_history.performed_at admin_operation_modifications_history.operator_email admin_operation_modifications_history.account_id admin_operation_modifications_history.entity_name admin_operation_modifications_history.entity_id admin_operation_modifications_history.current_data admin_operation_modifications_history.previous_data
+    where admin_operation_modifications_history.account_id = ?
+    where  admin_operation_modifications_history.entity_name = ?
+    orderby desc admin_operation_modifications_history.performed_at
     suffix ReadLastOperationsOnAccountAndEntityName
 )
 
 read paged (
-    select admin_operation_audit_trail.performed_at admin_operation_audit_trail.operator_email admin_operation_audit_trail.account_id admin_operation_audit_trail.entity_name admin_operation_audit_trail.entity_id admin_operation_audit_trail.current_data admin_operation_audit_trail.previous_data
-    where admin_operation_audit_trail.account_id = ?
-    where  admin_operation_audit_trail.entity_id = ?
-    orderby desc admin_operation_audit_trail.performed_at
+    select admin_operation_modifications_history.performed_at admin_operation_modifications_history.operator_email admin_operation_modifications_history.account_id admin_operation_modifications_history.entity_name admin_operation_modifications_history.entity_id admin_operation_modifications_history.current_data admin_operation_modifications_history.previous_data
+    where admin_operation_modifications_history.account_id = ?
+    where  admin_operation_modifications_history.entity_id = ?
+    orderby desc admin_operation_modifications_history.performed_at
     suffix ReadLastOperationsOnAccountAndEntityID
 )
 
-update admin_operation_audit_trail (
-  where admin_operation_audit_trail.id = ?
+update admin_operation_modifications_history (
+  where admin_operation_modifications_history.id = ?
 )
 ```
 
 The _DBX_ schema requires the application to define the data structure for the following fields of
-the `admin_operation_audit_trail` model:
+the `admin_operation_modifications_history` model:
 - `current_dat`
 - `previous_data`
 
@@ -460,14 +461,27 @@ for how to achieve it.
 
 ##### API implementation
 
-We have to review the current satellite administration API to see what endpoints we need to add or
-modify.
+We are going to build the API from the scratch because we want to use
+[API generator](https://github.com/storj/storj/tree/main/private/apigen).
 
-We also have to adapt it to allow to perform the operations based on the usr roles specified in the
+We may need to improve the API generator and add more functionalities to support every feature that
+we need to implement the back office API.
+
+The API has to perform the operations based on the usr roles specified in the
 _Authentication / Authorization_ section and be able to configure the groups associated to them.
 
-We have to review it to see if we want to add more logging or metrics, considering that wasn't
-created as a main feature as now.
+The API has to use the logging and metrics systems that we use for the rest of the satellite and
+using the similarly.
+
+Because the operations that the users can perform with the back office, the API MUST log all the
+operations performed by the users using a specific "log name" to ease filtering only them. We are
+using the 
+[same mechanism for logging all the requests to the satellite console](https://github.com/storj/storj/blob/main/satellite/console/consoleweb/server.go#L1170).
+Every log must include the API call and the operator's email who has executed it, but it doesn't
+have to contain any data from the request related to the customer, including URL paths that are
+parametrized with users'd data (e.g. email address) for not leaking any personal data into the logs.
+
+We'll delete the current admin API once this new one is rolled on.
 
 ##### Web UI
 
@@ -477,6 +491,11 @@ back office requires, you can see it on https://storj.github.io/admin-ui/login.
 
 We need to add the API calls and UI logic (client side validations, operation confirmation, etc.)
 and all the Javascript client side code that those require.
+
+We use the Javascript API client generated by
+[API generator](https://github.com/storj/storj/tree/main/private/apigen) (see [API implementation
+section](#api-implementation)).
+
 
 The current admin web UI will be deleted once this new one is rolled on.
 
@@ -512,7 +531,7 @@ All the web resources (stylesheets, fonts, etc) must be served from the same bac
 not use any external URL.
 
 We should plan to spend some time looking at the
-[OWASP cheatsheet series](https://cheatsheetseries.owasp.org/cheatsheets/AJAX_Security_Cheat_Sheet.html)
+[OWASP cheatsheet series](https://cheatsheetseries.owasp.org/index.html)
 for discovering how we could harden more these back office due to the sensitive operations that can
 be conducted.
 
@@ -547,8 +566,30 @@ force us to restore the service to run a previous version.
 
 ## Out of scope
 
-Features:
+### User features
+
 - Account:
   - Billing information.
   - Stripe information.
   - Stats: number of projects, total used storage, total used download bandwidth, total segments.
+
+### System features
+
+#### Avoid undesired request by a stale UI
+
+A stale UI happens when a user had loaded the Web UI before a new version is rolled out and it uses
+the UI when the new version is rolled out without refreshing the browser.
+
+This may provoke some undesired data updates without the user knowing it. For example, a new version
+has added a new data field to one of the operations that accepts to se ti to null; the previous UI
+and API client will continue sending a valid request without sending that field, but because the new
+API accepts null will unmarhsal the missing field to null overriding the value.
+
+For avoiding stale UIs, the API an always expect a specific header with a unique value that will
+change on every new version (e.g. git commit hash); the API rejects a request that doesn't send the
+value or an value that doesn't match with a specific error that the client can differentiate from
+other errors, so the UI can inform the user about it and refresh the browser to update the UI to the
+current version.
+
+If the UI is served by an independent server, that server MUST have a configuration field to
+indicate the unique value corresponding to the back office version whose UI is serving.
