@@ -11,12 +11,15 @@ Considerations when reading this document.
 
 Date: 2023-07-27
 Owner: Ivan Fraixedes
+
 Accountable: TBD
+
 Consulted:
 - Product. Reference person [Andi Steinke](https://github.com/stoweandi)
 - Customer support team. Reference person [Helene Unland](https://github.com/heunland).
 - Production owners.
 - Team integrations console squad: [Maximillian von Briesen (Moby)](https://github.com/mobyvb).
+
 Informed:
 - QA team.
 
@@ -38,7 +41,7 @@ API authentication is conducted by two mechanism:
   - EU1: https://eu1.admin.storj.tools
   - US1: https://us1.admin.storj.tools
 
-Token secret authentication allows to access al the API endpoints. Allowed groups authentication
+Token secret authentication allows to access all the API endpoints. Allowed groups authentication
 only to:
 - Read user's information.
 - Read/Update user's limits.
@@ -90,8 +93,8 @@ with or without any relation with Storj will be able to use it.
   9.  Set data placement restriction (geo fence).
   10. Remove data placement restriction (geo fence).
   11. Delete account:
-    12. When the account is clean: no API keys, no data in any of the projects, no unpaid invoices).
-    13. When the account isn't clean (delinquent accounts). It include to deletes all the data
+      1. When the account is clean: no API keys, no data in any of the projects, no unpaid invoices).
+      2.  When the account isn't clean (delinquent accounts). It include to deletes all the data
        associated to the account.
 2. Project
   1. View information: ID, name, creation time, limits (download, storage), user agent, data
@@ -163,7 +166,7 @@ __When an operator navigates to the account details view__
 
    Acceptance criteria:
    - Identifiable fields that are editable by the operator.
-2. I want a confirmation message or visual to display once the change has been made so that so that
+2. I want a confirmation message or visual to display once the change has been made so that
    the user knows the change went through.
 
    Acceptance criteria:
@@ -392,7 +395,7 @@ update admin_operation_modifications_history (
 
 The _DBX_ schema requires the application to define the data structure for the following fields of
 the `admin_operation_modifications_history` model:
-- `current_dat`
+- `current_data`
 - `previous_data`
 
 The fields will have different structure depending of the operation, but both will have the same
@@ -405,9 +408,12 @@ Each operation type have a structure that depends on its involved data.
 The structured data will be stored in JSON format because it's simpler to unmarshall it for sending
 it through the API to the clients.
 
-The update operation is needed because when an operation is caused by another one, we have to
-perform first the ones they are caused, then the one that causes the others, and finally update the
-ones caused with the ID of the one that caused them.
+The update statement is needed because some operations need to perform and complete other
+sub-operations before they can complete. The parent operation is executed after all the children
+operation complete, hence the children operation are inserted without a `caused_by` value (which is
+the ID of the parent operation). The `caused_by` column is set on the children operations when the
+parent operation completes, through the update statement. An example is when we want to delete an
+account, first we have to delete all its projects and finally the account.
 
 ##### Authentication / Authorization
 
@@ -533,7 +539,7 @@ We'll delete the current admin API once this new one is rolled on.
 
 We have to build a new Web UI from scratch with the Vue framework and the Vuetify component
 framework. The Web UI is already in development and it almost have every component and page that the
-back office requires, you can see it on https://storj.github.io/admin-ui/login.
+back office requires, you can see it on https://storj.github.io/admin-ui.
 
 We need to add the API calls and UI logic (client side validations, operation confirmation, etc.)
 and all the Javascript client side code that those require.
