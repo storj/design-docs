@@ -257,7 +257,6 @@ I want authorized users to be able to input the allotted usage for:
 - Egress limit, and select GB or TB
 - Segment limit, and enter the max number with formatted numerical input fields for better
   readability.
-- Bucket limit, and enter the number of buckets.
 
 __When an account needs to be deleted__
 
@@ -538,8 +537,10 @@ We'll delete the current admin API once this new one is rolled on.
 ###### Web UI
 
 We have to build a new Web UI from scratch with the Vue framework and the Vuetify component
-framework. The Web UI is already in development and it almost have every component and page that the
-back office requires, you can see it on https://storj.github.io/admin-ui.
+framework. The Web UI is already implemented, including some pages and widgets for features that
+aren't considered in this design doc, but that we want to add the in the future, so for the
+implementation detailed in this design document, we are going to hide/remove them. You can see the
+Web UI with random generated static data on https://storj.github.io/admin-ui.
 
 We need to add the API calls and UI logic (client side validations, operation confirmation, etc.)
 and all the Javascript client side code that those require.
