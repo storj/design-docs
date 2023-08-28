@@ -621,9 +621,21 @@ force us to restore the service to run a previous version.
   - Billing information.
   - Stripe information.
   - Stats: number of projects, total used storage, total used download bandwidth, total segments.
-
 - Node tagging management. This will be handled by a different back office which is already in
   design or development phase.
+- Require specific metadata when an operations is conducted.
+  This was a proposal on the review of this document.
+
+  We could add these metadata to the _modification history_ and requires the operator to provide it.
+  Ideally the UI should request what metadata the operator has to provide to keep the _modification
+  history_ homogeneous for making easy to show it or analyze it. We could validate the metadata in
+  the backend, but ti doesn't seem necessary because only specific users which a certain level of
+  trust have access and by passing the UI restrictions is less dangerous on what they could do if
+  they want to do something malicious.
+
+  We haven't added to this initial release because we don't have a specific and clear use case and
+  adding it in future releases doesn't require any architecture change, hence we could add it in any
+  future release without troubles.
 
 ### System features
 
@@ -633,7 +645,7 @@ A stale UI happens when a user had loaded the Web UI before a new version is rol
 the UI when the new version is rolled out without refreshing the browser.
 
 This may provoke some undesired data updates without the user knowing it. For example, a new version
-has added a new data field to one of the operations that accepts to se ti to null; the previous UI
+has added a new data field to one of the operations that accepts to set it to null; the previous UI
 and API client will continue sending a valid request without sending that field, but because the new
 API accepts null will unmarhsal the missing field to null overriding the value.
 
