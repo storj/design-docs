@@ -12,7 +12,8 @@ Considerations when reading this document.
 Date: 2023-07-27
 Owner: Ivan Fraixedes
 
-Accountable: TBD
+Accountable:
+- Team Delivery console squad ([Jen](https://github.com/jenlij)).
 
 Consulted:
 - Product. Reference person [Andi Steinke](https://github.com/stoweandi)
