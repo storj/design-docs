@@ -77,42 +77,44 @@ with or without any relation with Storj will be able to use it.
 
 ##### Operations
 
-1. Account:
+1 Account:
   1. View information: ID, email, full name, paid/free tier, suspended?, user agents, Multi-factor
-     authentication enabled/disabled, data placement restriction (geo fence & SOC2), list of projects,
+     authentication enabled/disabled, data placement restriction (geo-fence & SOC2), list of projects,
      limits (download, storage, number of segments, number of projects allowed).
   2. Change email address.
   3. Disable Multi-factor authentication.
-  5. Set limits (download, storage, number of segments, number of projects allowed).
-  6. Suspend "disable upload/download":
+  4. Set limits (download, storage, number of segments, number of projects allowed).
+  5. Suspend "disable upload/download":
      1. Temporary. There are a few types and they usually are associated to something that the users
         can unsuspend if they do what's needed to resolve the issue (e.g. paying an invoice that was
-        initially unpaid because they user didn't set a credit card up).
+        initially unpaid because the user didn't set a credit card up).
      2. Permanently. Only the operators can unsuspend the account (e.g. a user who has not paid
-        invoices despite they set a credit card or an account hosting illegal content).
-  7. Re-activate "re-enable upload/download" that was suspended:
+        invoices despite they set up a credit card or an account hosting illegal content).
+  6. Re-activate "re-enable upload/download" that was suspended:
      1. Temporary.
      2. Permanently.
-  8. Set user agent.
-  9.  Set data placement restriction (geo fence & SOC2).
-  10. Remove data placement restriction (geo fence &S SOC2).
-  11. Delete account:
+  7. Set user agent.
+  8.  Set data placement restriction (geo-fence & SOC2).
+  9. Remove data placement restriction (geo-fence &S SOC2).
+  10. Delete account:
       1. When the account is clean: no API keys, no data in any of the projects, no unpaid invoices).
-      2.  When the account isn't clean (delinquent accounts). It include to deletes all the data
-       associated to the account.
-2. Project
+      2.  When the account isn't clean (delinquent accounts). It includes deleting all the data
+       associated with the account.
+
+2 Project
   1. View information: ID, name, creation time, limits (download, storage), user agent, data
-     placement restriction (geo fence & SOC2),  stats (total used storage, total used download bandwidth,
+     placement restriction (geo-fence & SOC2),  stats (total used storage, total used download bandwidth,
      total segments).
   2. Set user agent.
-  3. Send invitation to grant access to another account.
-  4. Set data placement restriction (geo fence & SOC2).
-  5. Remove data placement restriction (geo fence & SOC2).
-3. Bucket
-  1. View information: ID, name, user agent, data placement restriction (geo fence & SOC2).
+  3. Send an invitation to grant access to another account.
+  4. Set data placement restriction (geo-fence & SOC2).
+  5. Remove data placement restriction (geo-fence & SOC2).
+
+3 Bucket
+  1. View information: ID, name, user agent, data placement restriction (geo-fence & SOC2).
   2. Set user agent.
-  3. Set data placement restriction (geo fence & SOC2).
-  4. Remove data placement restriction (geo fence & SOC2).
+  3. Set data placement restriction (geo-fence & SOC2).
+  4. Remove data placement restriction (geo-fence & SOC2).
 
 ##### Job stories
 
@@ -199,32 +201,32 @@ select the details of the project we want to change.
 Acceptance criteria:
 - We can see the project names and IDs.
 - We can apply user agents to projects.
-- We can see if a geo fence or SOC2 is applied and in case of geo fence, the region name.
+- We can see if a geo-fence or SOC2 is applied and in case of geo-fence, the region name.
 - We can see the project limits and project usage.
 - Authorized users can select and change:
-  - The geo fence/SOC2 if the project is empty.
+  - The geo-fence/SOC2 if the project is empty.
   - The limits of the project: egress, storage, segments, buckets.
   - Delete the project.
 
 __When changes need to happen to a bucket__
 
 I want to be able to view bucket details per account/per project so that we can modify/add user
-agents to buckets and apply geo fence/SOC2 settings to buckets.
+agents to buckets and apply geo-fence/SOC2 settings to buckets.
 
 Acceptance criteria:
 - We can see the bucket names per project ID.
 - We can apply user agents to buckets.
-- We can see and apply a geo fence/SOC2 to an empty bucket.
+- We can see and apply a geo-fence/SOC2 to an empty bucket.
 - We can see usage per bucket.
 
-__When geo fence needs to be applied to an account__
+__When geo-fence needs to be applied to an account__
 
-I want authorized users to select a geo fence/SOC2 setting on the account details view and select the geo
+I want authorized users to select a geo-fence/SOC2 setting on the account details view and select the geo
 fence region to be applied to new projects/buckets.
 
   Acceptance criteria:
-  - Drop down selection of available geo fence regions and one item for SOC2.
-  - The existing project and buckets will NOT get the geo fence/SOC2 added.
+  - Drop down selection of available geo-fence regions and one item for SOC2.
+  - The existing project and buckets will NOT get the geo-fence/SOC2 added.
 
 __When an account needs to be suspended__
 
