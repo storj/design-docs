@@ -1,3 +1,6 @@
+tags: [ "satellite", "satellite/admin", "support" ]
+---
+
 # Admin Back Office v1
 
 Considerations when reading this document.
