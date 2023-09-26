@@ -20,3 +20,8 @@ Workspace for all Storj design documents
 
   The additional files must be store in a directory located in the root of this repository with the
   same name of the document without the `.md` extension.
+- The documents must use the last version of the template document
+- [00000000-template.md](00000000-template.md]). The matches the structure that we outlined in our
+  Clonfluence page
+  [proposal design document process](https://storjlabs.atlassian.net/wiki/spaces/delivery/pages/2548137985/Design+Doc+Process+Proposal+2023)
+  (non-public document).
