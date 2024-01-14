@@ -1,4 +1,24 @@
+tags: []
+---
+
 # Low I/O piece storage
+
+## Essentials
+
+### Header
+
+Date: January 6th, 2024
+
+Owner:
+
+Accountable:
+-
+
+Consulted:
+-
+
+Informed:
+-
 
 ## Abstract
 
@@ -44,7 +64,9 @@ Some ways to avoid penalties include:
   algorithms) and the hard disk drive (through the _Native Command Queue_ feature) can reorder them to reduce
   penalties, or avoid a performing a write operation altogether (if two write operations end up modifying the same
   sector). For example, the popular deadline scheduler sorts operations by sector number to leverage the case of two
-  operations in short distance.
+  operations in short distance [2].
+
+[2] https://en.wikipedia.org/wiki/Deadline_scheduler
 
 Additional performance constraints come from popular block device setups like thinly allocated storage which might
 increase penalties, or parity RAID schemes and SMR drives, which result in significant I/O amplification
@@ -62,13 +84,13 @@ Many of these features negatively impact performance of storage nodes though. Fo
   seek for each file access, and storage nodes do not use hard links.
 * Journals improve recovery of file system metadata after a failure (e.g. system crash). Yet they require an
   additional seek and, depending on configuration, a forced write, for each operation that modifies metadata, while
-  storage nodes can easily recover some types of lost metadata operations (e.g. if a file is deleted from trash by
-  one trash file walker cycle, it will be deleted by the next one).
+  storage nodes can easily recover some types of lost metadata operations, e.g. if a file is not deleted from trash by
+  one trash file walker cycle, it will be deleted by the next one.
 * Many file system operations are required to be atomic, for example file creation. This requires forced
-  writes. Yet storage nodes do not require atomicity for many of them (e.g. it's rather unlikely that two pieces
-  with the same ID will be uploaded at the same time).
+  writes. Yet storage nodes do not require atomicity for many of them, e.g. it's rather unlikely that two pieces
+  with the same ID will be uploaded at the same time.
 * Some file systems or storage solutions have copy-on-write semantics which allow cheap snapshots or deduplication,
-  but additionally fragment data when faced with small writes.
+  but additionally fragment metadata when faced with small writes.
 * Inodes store metadata information, such as user permissions, date of modification, file names, etc. This makes
   inodes larger than necessary for storage node purposes. Bigger data structures end up taking more cache space.
   For example with the current average segment size of 10.2 MB: ext4 with default inode size of 256 bytes and a
@@ -94,7 +116,7 @@ This is a rough draft of a design. Notes that mention known missing details or a
 Three types of files are used: a journal file, pack files to store pieces, and a piece index file to quickly find a
 piece by its ID. They are roughly equivalent to the file system journaling, data blocks and direntries/inodes.
 
-Data structure description define some magic numbers, such as the maximum pack size. It may make sense to make them
+Data structure descriptions define some magic numbers, such as the maximum pack size. It may make sense to make them
 configurable, but for simplicity the document suggests certain values to focus attention on a specific solution.
 
 
@@ -140,7 +162,7 @@ this limits the size of a piece, which may be undesirable.
 
 We will be using hole punching (FALLOC_FL_PUNCH_HOLE) to free up disk space used by deleted pieces. We will be using
 file collapsing (FALLOC_FL_COLLAPSE_RANGE) to compact pack files and free up address space within a pack file. The
-former is available on all modern file systems, even including NTFS. The latter only on Linux, but it might be possible to
+former is available on all modern file systems, even NTFS. The latter only on Linux, but it might be possible to
 emulate it by rewriting pack files. See the _Operations_ section below.
 
 Hole punching also means it may not be possible to jump from one header to the next one by reading piece size from
@@ -265,7 +287,7 @@ In the comparisons to the current approach the following will be assumed:
 3. No SSD caching. For the purposes of a storage node an SSD cache of a non-trivial amount set up properly would bring
    the same benefits as more RAM, but it is not always possible to add an SSD to an existing setup. Besides, even
    with SSD cache, the described approach reduces the number of writes performed, prolonging its lifespan and
-   allowing a cheaper consumer devices to perform.
+   allowing cheaper consumer devices to perform.
 
 
 #### Start
@@ -477,7 +499,7 @@ file.
 1. A new journal file is created.
 2. The first message is: *PieceIndexSize(k)*, so that in case of recovery, the right size of a piece index is known
    already at the beginning of the recovery procedure.
-3. All entries from the index file as written down into the new file as a sequence of messages: *PresentPiece(…)*,
+3. All entries from the index file are written down into the new file as a sequence of messages: *PresentPiece(…)*,
    copying all data from the piece index except for the trash bit, and the expiration/trash timestamp if the trash
    bit was set.
 4. fsync(), rename over the old journal file.
@@ -491,6 +513,9 @@ It might make sense to also perform this operation on a clean shutdown.
 
 Trash status cannot be stored, as the journal does not store messages for restore from trash procedure. This is
 not a concern though, the next garbage collection will deal with these pieces anyway.
+
+TODO: not so sure about the last statement anymore. If journal rewrites turn out to happen more often than garbage
+collection, then we would never collect that garbage. Needs some thinking.
 
 
 ## Rationale
