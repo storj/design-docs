@@ -1,45 +1,124 @@
-tags: []
+tags: ["satellite", "satellite/console", "encryption"]
 ---
 
-# Satellite Managed Encryption
+# Satellite-Managed Encryption Passphrases
 
-## Abstract
+## Essentials
 
-In order to provide a better experience for a large portion of our users, we want to support "satellite-managed encryption" for objects and paths. In short, this means that a project with satellite managed encryption:
+### Header
 
-* has all objects uploaded with encryption derived from a secure passphrase stored on the satllite and project salt
-* has path encryption disabled
+Date: 2024-01-29
 
-Supporting projects with these limitations means that it will be possible for users to create projects where they never need to enter a personally-managed encryption passphrase. Disabling path encryption also allows lexographical sorting by default, which is a feature that cannot be supported on projects with path encryption enabled.
+Owner: mobyvb
 
-## Background
+Accountable:
+- Console squad
 
-We are talking about "satellite managed" encryption, but the code is organized such that generation of encryption details always happens on the client. In the Satellite GUI, encryption details are retrieved on the client side, and then inserted into an access via client-side WebAssembly. Similarly, the Uplink can insert encryption details during commands like `uplink setup` and `uplink access create`.
+Consulted:
+- Product
+- Delivery (TODO)
+- Satellite (TODO)
 
-For a project flagged for satellite managed encryption, we need to:
-* derive root encryption key for all accesses using a passphrase stored in a key-management store on the satellite and project salt
-* create all accesses with the path cipher `storj.EncNull`
+Informed:
+- Engineering
 
-One example of a place that would need to be updated with these rules is [this part of the WebAssembly code](https://github.com/storj/storj/blob/a62929fd5757a40eda5d0b044ad2cefc14708410/satellite/console/consolewasm/access.go#L22-L29)
+### Context
 
-Because commands like `uplink setup` and `uplink access create` support the ability for a user to configure details like path encryption and encryption passphrase, it is important that for projects flagged as "satellite managed encryption", we never directly provide a user with a "raw API key". Rather, in the satellite UI, when the user creates credentials like access grants or S3 creds, these credentials should already be configured to use the satellite-managed encryption passphrase and no path encryption. This prevents the user from unintentionally creating a bad access in Uplink.
+One common issue for new users is the added step of managing an encryption passphrase for a project. The user must store the encryption passphrase, and enter it when generating access credentials or using the object browser in the Satellite UI.
 
-## Design
+Having a user-managed encryption passphrase has privacy benefits for the user, but it adds an additional layer of complexity to user experience. We want to continue to support users who want to manage their own encryption credentials, while allowing other users who are not interested in managing their own encryption credentials to easily use the product. 
 
-1. add a new `projects` DB column, like `projects.satellite_managed_encryption`, with all existing and new projects having this turned off
-2. Key Management Store on satellite:
-    * a secure way to associated project IDs with random encryption passphrases
-    * should have heavy access restrictions and/or be encrypted
-    * should be just as reliable as metainfo DB, since data loss or corruption from the KMS means data lost on the network
-3. Satellite GUI changes:
-    * support ability to create a project with "satellite managed encryption" turned on
-    * any access credential created in the UI (for object browser, Uplink, or S3 tool) is configured to
-        * use satellite KMS encryption passphrase + project salt for object encryption
-        * have no path encryption enabled
-    * ability to generate a "raw API key" in the Satellite UI is removed from satellite managed encryption projects
-        * this is important for proper access usage for old versions of Uplink
-4. Uplink changes:
-    * new versions of Uplink can be updated to check for the new flag on the project, and automatically create accesses with the correct rules during commands like `uplink setup` and `uplink access create`
+Additionally, by default, object paths are encrypted. This has privacy benefits, but prevents certain features that some users are interested in, like lexicographic ordering of object keys. Like with user-managed encryption passphrases, we want to continue supporting path encryption for users who are interested, while allowing other users who want lexicographic ordering features to create a project which has path encryption turned off.
 
-## Open issues
+### Goals
+
+Users are provided the option to create a project that uses "satellite-managed encryption". One of these projects:
+* uses a securely-stored, random passphrase stored on the satellite as the project's encryption passphrase
+* restricts all files to be uploaded without path encryption
+
+The main goals are to:
+* provide users with an experience that does not require managing and entering an encryption passphrase in the Satellite UI
+* provide users with an easy way to view and list files in lexographical order
+
+### Approach / Design
+
+#### Key Management Store
+
+We need a secure way to store and look up project encryption passphrases on the Satellite. Someone with normal Satellite DB access should not be able to view this data, and ideally it is encrypted. At the same time, it must be very reliable, as losing data about project encryption passphrases means that data may have been lost.
+
+The specific technology/product used for the KMS can be decided in a later stage. The primary features and concerns we should keep in mind:
+* as simple as possible from an implementation perspective, e.g. key-value lookup for project ID -> encryption passphrase
+* secure - should be encrypted, and highly restricted who/what has access to it
+* reliable - should have the same standards for uptime/data loss as metainfo DB
+
+#### Satellite Project Updates
+
+A new flag should be added to the `projects` table, like `projects.satellite_managed_encryption`. This should be false for all existing projects. While satellite-managed-encryption (this design) is in-progress, new projects should be created with this flag set to false.
+
+Functionality should then be added to allow creating a project with a satellite managed encryption passphrase:
+* the new column in the `projects` table is set to `true` for this project
+* a new key-value pair is created for the new project in the Key Management Store. The passphrase should be cryptographically random
+* endpoints on the satellite API are added or updated so that an authenticated user can request the encryption passphrase for a project during access creation
+
+#### WebAssembly Updates
+
+Wasm functionality must be updated to allow the Satellite UI to properly generate access credentials with path encryption disabled. [Code for reference](https://github.com/storj/storj/blob/a62929fd5757a40eda5d0b044ad2cefc14708410/satellite/console/consolewasm/access.go#L22-L29).
+
+#### Satellite UI Updates
+
+When creating a project, the user should be provided the option to create different types of projects:
+
+* satellite-managed-encryption project
+* user-managed-encryption project
+
+The user-managed-encryption project will be the same as before, and user will always be prompted to enter encryption passphrase when necessary, e.g. when using the file browser or generating an access grant.
+
+The satellite-managed-encryption project will never prompt the user for an encryption passphrase in the UI. Instead, when the user does an action that requires generating credentials, the UI will retrieve the project's encryption passphrase from the satellite KMS, and generate an access grant using this passphrase, and path encryption disabled.
+
+The user should not be able to directly retrieve a "raw API key" from the Satellite UI. This prevents the user from unintentionally creating "invalid" credentials using a raw API key with Uplink. The only credentials that can be generated from the access page for a satellite-managed-encryption project should be credentials that already have embedded encryption rules.
+
+The file browser in the UI should generate access credentials using the passphrase from the satellite KMS, and no path encryption.
+
+#### Uplink Updates
+
+New versions of Uplink can be updated to check for the new flag on the project, and automatically create accesses with the correct rules during commands like `uplink setup` and `uplink access create`.
+
+This will allow new Uplink versions to properly handle "raw API keys" (access keys without information like satellite or encryption embedded) for "satellite-managed-encryption" projects.
+
+These changes are technically unnecessary if the UI is updated to not provide raw API keys for satellite-managed-encryption projects. However, it may be useful to make these changes to Uplink so that future versions of Uplink can use raw API keys even for satellite-managed-encryption projects.
+
+## Reminders
+
+### Security / Privacy
+
+The most important points to keep in mind:
+* strict requirements for how the key-management store is built and accessed should be defined
+* we should keep a path open for users who want to create projects using path encryption and user-managed encryption passphrases
+* what happens if the project encryption passphrase is leaked? Is there a way to migrate data to use a new, secure passphrase, e.g. with server-side copy?
+
+### Observability
+
+We should ensure that we update analytics events during project creation to identify whether a project was created with satellite-managed or user-managed encryption.
+
+### Test plan
+
+The most important things to test:
+* if a project is created with satellite-managed encryption, it should be very difficult or impossible for a user to unintentionally upload files with path encryption enabled, or with an encryption passphrase other than the project's satellite-managed passphrase.
+* Satellite KMS for encryption passphrases is secure - should be encrypted, and access should be highly protected. Secure transfer of credentials to the client should only happen for project members.
+
+### Rollout
+
+This should be rolled out with a feature flag. The ability to create projects with satellite-managed-encryption should not be possible if the feature is turned off.
+
+We should only turn the feature on when the UI and backend tasks in the design are all complete. It can be enabled before changes are made to Uplink, since the UI will not allow creating Uplink credentials with incorrect encryption settings.
+
+### Rollback
+
+In the event that we need to roll back the change, we should turn the feature flag off as soon as possible. Already-existing projects that have been created with satellite-managed-encryption should continue to work. The feature flag should only disable creation of such projects.
+
+If the feature can be fixed in code, the fixes should be deployed before turning the feature flag back on.
+
+If the feature cannot be fixed without user action, any user who has created a satellite-managed-encryption project should be contacted with instructions for how to access/migrate/handle any data they have uploaded.
+
+## Out of scope
 
