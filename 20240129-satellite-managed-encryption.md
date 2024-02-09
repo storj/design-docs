@@ -44,12 +44,33 @@ The main goals are to:
 
 #### Key Management Store
 
-We need a secure way to store and look up project encryption passphrases on the Satellite. Someone with normal Satellite DB access should not be able to view this data, and ideally it is encrypted. At the same time, it must be very reliable, as losing data about project encryption passphrases means that data may have been lost.
-
-The specific technology/product used for the KMS can be decided in a later stage. The primary features and concerns we should keep in mind:
+We need a secure way to store and look up project encryption passphrases on the Satellite. Someone with normal Satellite DB access should not be able to view this data, and ideally it is encrypted. At the same time, it must be very reliable, as losing data about project encryption passphrases means that data may have been lost. The primary features and concerns we should keep in mind:
 * as simple as possible from an implementation perspective, e.g. key-value lookup for project ID -> encryption passphrase
 * secure - should be encrypted, and highly restricted who/what has access to it
 * reliable - should have the same standards for uptime/data loss as metainfo DB
+
+##### Vault
+The shortlisted KMS platform is [Hashicorp's Vault](https://www.vaultproject.io). Vault is a source-available identity-based secret and encryption management system that provides encryption services that are gated by authentication and authorization methods. Using Vault’s UI, CLI, or HTTP API, access to secrets and other sensitive data can be securely stored and managed, tightly controlled (restricted), and auditable ([source](https://developer.hashicorp.com/vault/docs/what-is-vault)).
+Vault has a number of different feature like [encryption as a service](https://www.vaultproject.io/docs/secrets/transit), [key-value store](https://www.vaultproject.io/docs/secrets/kv), which more fits our use case, and more.
+
+* Vault's encryption as a service is a high-level API for encrypting and decrypting data (passphrases in our case). It has no storage capabilities and will require us to store the encrypted passphrases, which we may not want to do because we want to as much as possible compartmentalise access to this data.
+* Vault's key-value store is simply an encrypted storage for arbitrary key-value secrets, exactly as we need for our project ID -> encryption passphrase secrets.
+It has a Golang library that can be used to trivially access our store instance from the Satellite backend.
+
+##### Infisical
+[Infisical](https://infisical.com) is an open source SecretOps platform that is used to securely store secrets and manage them across a development lifecycle. I can be used to manage secrets that access external infrastructure with a key feature that allows the user to have different values for secrets in different environments (development and production).
+It can also be used to inject secrets during deployment. It is obvious that this platform is more designed for developer -> devops workflows, it can however be used to programmatically securely store project passphrases though it is not an intended uses case. It unfortunately does not have a Golang library.
+
+For deployment, we have the option to host Vault/Infisical ourselves and manage it securely, or use a managed instances from Harshicorp/Infisical themselves. However, we choose to deploy it, we will need to ensure that it is highly available and secure so as not to leak or lose passphrases.
+We must make sure to restrict access to deployment secrets.
+
+To interact with the KMS, the satellite will have to be configured with;
+* The address of the KMS
+* Secret path (Where the secret is stored - [Vault](https://developer.hashicorp.com/vault/api-docs/secret/kv/kv-v1#path), It means the same for Infisical too)
+* The authentication token used to initialise the vault client
+* Or the Infisical access token and Infisical API key set in the `Authorization` and `X-API-KEY` header respectively in an http request.
+
+It is important that these config values be mre protected than what is currently in storj/infra.
 
 #### Satellite Project Updates
 
@@ -119,6 +140,9 @@ In the event that we need to roll back the change, we should turn the feature fl
 If the feature can be fixed in code, the fixes should be deployed before turning the feature flag back on.
 
 If the feature cannot be fixed without user action, any user who has created a satellite-managed-encryption project should be contacted with instructions for how to access/migrate/handle any data they have uploaded.
+
+## Open Questions
+How to securely configure the satellite with secrets for the KMS? Currently, secrets in storj/infra are encrypted, but anyone with the access to the repo and certain permissions can access them. We need these to be more compartmentalised.
 
 ## Out of scope
 
