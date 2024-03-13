@@ -49,7 +49,7 @@ We need a secure way to store and look up project encryption passphrases on the 
 * secure - should be encrypted, and highly restricted who/what has access to it
 * reliable - should have the same standards for uptime/data loss as metainfo DB
 
-The KMS will store will be made up of 3 components:
+The KMS will be made up of 3 components:
 * The master key and store - The master key will be used to encrypt and decrypt passphrases. The store will be used to securely store the master key. The store will be [Google's Secret Manager](https://cloud.google.com/security/products/secret-manager), which is a secure store for secrets such as API keys and other sensitive data.
 This secrets manager was chosen because it is just as secure as the alternatives, if not more and yet cheaper and easier to manage. It also is more convenient to use as we already use GCP.
 * The KMS service - This is part of the Satellite that will be responsible for fetching the master key at startup, encrypting and decrypting passphrases, and storing and retrieving same from the passphrase store. The master key will be kept in memory throughout the lifetime of the Satellite.
@@ -164,7 +164,8 @@ This option is exactly the same as what is described in the Key Management Store
 A downside to this as compared to Google's Secret Manager is that it is more expensive and more cumbersome to manage. Also, we already use GCP and it is more convenient to use one more service.
 
 ## Open Questions
-How to securely configure the satellite with the encryption master key or credentials to access Secrets Manager?
+* How to securely configure the satellite with the encryption master key or credentials to access Secrets Manager?
+* How to securely back up and/or rotate the master key?
 
 ## Out of scope
 
