@@ -56,6 +56,19 @@ This secrets manager was chosen because it is just as secure as the alternatives
 The satellite will be configured with credentials needed to access the Secret Manager (the master key store).
 * The Passphrase store - This where the encrypted passphrases will be stored. It will be a new column, `passphrase_enc` on the `projects` table. As added benefits to storing this on `projects`, we will be able to back up encrypted passphrases and also rotate master keys.
 
+###### Configuring the Satellite
+The satellite should be configured with the following:
+* a credential to access the Secret Manager, in this case, a service account.
+  * the service account should have the minimum permissions required to access the Secret Manager.
+  * the service account should possibly be IP restricted to the satellite's IP address.
+  * the service account should be restricted to access only the specific secretes needed for this purpose; the Master Key.
+  * alternatively, a Kubernates Service account can be used in place of the service account so we do not actually expose the service account itself, while also restricting access to the Kubernetes pod.
+* the project ID of the project that the Secret Manager is in.
+* the secret ID of the master key, which at this point should already be created in the Secret Manager.
+
+Alternatively, we can use the [GCP Secret Store CSI driver](https://github.com/GoogleCloudPlatform/secrets-store-csi-driver-provider-gcp) to mount the Master Key in the Satellite pod without having to expose any credentials at all.
+However, there are [security considerations](https://github.com/GoogleCloudPlatform/secrets-store-csi-driver-provider-gcp?tab=readme-ov-file#security-considerations) we have to make.
+
 #### Satellite Project Updates
 
 A new column should be added to the `projects` table to be the passphrase store, like `projects.passphrase_enc`. This should be the encrypted passphrase for satellite-managed-encryption projects only and `null` for others.
