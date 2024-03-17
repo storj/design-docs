@@ -54,23 +54,18 @@ The KMS will be made up of 3 components:
 This secrets manager was chosen because it is just as secure as the alternatives, if not more and yet cheaper and easier to manage. It also is more convenient to use as we already use GCP.
 * The KMS service - This is part of the Satellite that will be responsible for fetching the master key at startup, encrypting and decrypting passphrases, and storing and retrieving same from the passphrase store. The master key will be kept in memory throughout the lifetime of the Satellite.
 The satellite will be configured with credentials needed to access the Secret Manager (the master key store).
-* The Passphrase store - This where the encrypted passphrases will be stored. It will be a new column, `passphrase_enc` on the `projects` table.
+* The Passphrase store - This where the encrypted passphrases will be stored. It will be a new column, `passphrase_enc` on the `projects` table. As added benefits to storing this on `projects`, we will be able to back up encrypted passphrases and also rotate master keys.
 
 #### Satellite Project Updates
 
-A new flag should be added to the `projects` table, like `projects.satellite_managed_encryption`. This should be false for all existing projects. While satellite-managed-encryption (this design) is in-progress, new projects should be created with this flag set to false.
-Another column should be added to the `projects` table to be the passphrase store, like `projects.passphrase_enc`. This should be the encrypted passphrase for satellite-managed-encryption projects only and null for others.
+A new column should be added to the `projects` table to be the passphrase store, like `projects.passphrase_enc`. This should be the encrypted passphrase for satellite-managed-encryption projects only and `null` for others.
+Projects that are created before this feature is deployed and projects created after but opt out should have `null` in this column.
 
 Functionality should then be added to allow creating a project with a satellite managed encryption passphrase:
-* the `projects.satellite_managed_encryption` column is set to `true` for this project
 * the KMS service generates a cryptographically random passphrase and encrypts it using the master key
 * the passphrase store is updated with the encrypted passphrase for this project
 * endpoints on the satellite API are added or updated so that an authenticated user can request the encryption passphrase for a project during access creation
   * endpoints handlers should use the KMS service to retrieve the encrypted passphrase from the store and decrypt it using the master key
-
-#### WebAssembly Updates
-
-Wasm functionality must be updated to allow the Satellite UI to properly generate access credentials with path encryption disabled. [Code for reference](https://github.com/storj/storj/blob/a62929fd5757a40eda5d0b044ad2cefc14708410/satellite/console/consolewasm/access.go#L22-L29).
 
 #### Satellite UI Updates
 
@@ -87,9 +82,17 @@ The user should not be able to directly retrieve a "raw API key" from the Satell
 
 The file browser in the UI should generate access credentials using the passphrase from the satellite KMS, and no path encryption.
 
-#### Uplink Updates
+#### External Updates
 
-New versions of Uplink can be updated to check for the new flag on the project, and automatically create accesses with the correct rules during commands like `uplink setup` and `uplink access create`.
+###### WebAssembly and Bindings
+
+* Wasm functionality must be updated to allow the Satellite UI to properly generate access credentials with path encryption disabled. [Code for reference](https://github.com/storj/storj/blob/a62929fd5757a40eda5d0b044ad2cefc14708410/satellite/console/consolewasm/access.go#L22-L29).
+* Our bindings for other languages should also be reviewed and possibly updated to work properly as well.
+  * [Python access library](https://github.com/storj/access-python) 
+
+###### Uplink
+
+New versions of Uplink (uplink-cli, libuplink and the uplink-c) can be updated to check for the new flag on the project, and automatically create accesses with the correct rules during commands like `uplink setup` and `uplink access create`.
 
 This will allow new Uplink versions to properly handle "raw API keys" (access keys without information like satellite or encryption embedded) for "satellite-managed-encryption" projects.
 
@@ -103,6 +106,7 @@ The most important points to keep in mind:
 * strict requirements for how the key-management store is built and accessed should be defined
 * we should keep a path open for users who want to create projects using path encryption and user-managed encryption passphrases
 * what happens if the project encryption passphrase is leaked? Is there a way to migrate data to use a new, secure passphrase, e.g. with server-side copy?
+* we should have a clear UI cues for users to understand the implications of creating a project with satellite-managed encryption
 
 ### Observability
 
