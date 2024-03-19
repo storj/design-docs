@@ -49,12 +49,11 @@ We need a secure way to store and look up project encryption passphrases on the 
 * secure - should be encrypted, and highly restricted who/what has access to it
 * reliable - should have the same standards for uptime/data loss as metainfo DB
 
-The KMS will be made up of 3 components:
+The KMS will be made up of 2 components:
 * The master key and store - The master key will be used to encrypt and decrypt passphrases. The store will be used to securely store the master key. The store will be [Google's Secret Manager](https://cloud.google.com/security/products/secret-manager), which is a secure store for secrets such as API keys and other sensitive data.
 This secrets manager was chosen because it is just as secure as the alternatives, if not more and yet cheaper and easier to manage. It also is more convenient to use as we already use GCP.
-* The KMS service - This is part of the Satellite that will be responsible for fetching the master key at startup, encrypting and decrypting passphrases, and storing and retrieving same from the passphrase store. The master key will be kept in memory throughout the lifetime of the Satellite.
-The satellite will be configured with credentials needed to access the Secret Manager (the master key store).
-* The Passphrase store - This where the encrypted passphrases will be stored. It will be a new column, `passphrase_enc` on the `projects` table. As added benefits to storing this on `projects`, we will be able to back up encrypted passphrases and also rotate master keys.
+* The KMS service - This is part of the Satellite that will be responsible for fetching the master key at startup, and encrypting and decrypting passphrases at the request of another service that can manage a project. It will keep the master key in memory throughout the lifetime of the Satellite.
+The satellite will be configured with a way to access the master key (detailed in the next section below).
 
 ###### Configuring the Satellite
 The satellite should be configured with the following:
@@ -75,10 +74,11 @@ A new column should be added to the `projects` table to be the passphrase store,
 Projects that are created before this feature is deployed and projects created after but opt out should have `null` in this column.
 
 Functionality should then be added to allow creating a project with a satellite managed encryption passphrase:
-* the KMS service generates a cryptographically random passphrase and encrypts it using the master key
-* the passphrase store is updated with the encrypted passphrase for this project
+* the console service receives a request to create a project
+* the console service requests a master-key-encrypted encrypted, cryptographically random passphrase from the KMS service
+* the console service creates the project with the encrypted passphrase
 * endpoints on the satellite API are added or updated so that an authenticated user can request the encryption passphrase for a project during access creation
-  * endpoints handlers should use the KMS service to retrieve the encrypted passphrase from the store and decrypt it using the master key
+  * endpoints handlers should use the KMS service to decrypt the project's encrypted
 
 #### Satellite UI Updates
 
