@@ -95,19 +95,9 @@ The user should not be able to directly retrieve a "raw API key" from the Satell
 
 The file browser in the UI should generate access credentials using the passphrase from the satellite KMS, and no path encryption.
 
-#### External Updates
-
 ###### WebAssembly
 
 * Wasm functionality must be updated to allow the Satellite UI to properly generate access credentials with path encryption disabled. [Code for reference](https://github.com/storj/storj/blob/a62929fd5757a40eda5d0b044ad2cefc14708410/satellite/console/consolewasm/access.go#L22-L29).
-
-###### Uplink and Bindings
-* New versions of Uplink (uplink-cli, libuplink and the uplink-c) can be updated to check for the new flag on the project, and automatically create accesses with the correct rules during commands like `uplink setup` and `uplink access create`.
-* Our [bindings](https://github.com/storj-thirdparty) for other languages should also be reviewed and possibly updated to work properly as well. They should not allow for setting custom passphrases for Satellite Managed Encryption projects.
-
-This will allow new Uplink versions to properly handle "raw API keys" (access keys without information like satellite or encryption embedded) for "satellite-managed-encryption" projects.
-
-These changes are technically unnecessary if the UI is updated to not provide raw API keys for satellite-managed-encryption projects. However, it may be useful to make these changes to Uplink so that future versions of Uplink can use raw API keys even for satellite-managed-encryption projects.
 
 ## Reminders
 
@@ -157,8 +147,14 @@ For this option, it would have to be decided that the satellite config is secure
 The only difference from the Key Management System section above is that we don't use Google Secrets Manager or any other third party for storing the master key.
 
 ## Open Questions
-* How to securely configure the satellite with the encryption master key or credentials to access Secrets Manager?
 * How to securely back up and/or rotate the master key?
 
 ## Out of scope
+##### Uplink and Bindings
+* New versions of Uplink (uplink-cli, libuplink and the uplink-c) can be updated to check for the new flag on the project, and automatically create accesses with the correct rules during commands like `uplink setup` and `uplink access create`.
+* Our [bindings](https://github.com/storj-thirdparty) for other languages should also be reviewed and possibly updated to work properly as well. They should not allow for setting custom passphrases for Satellite Managed Encryption projects.
+
+This will allow new Uplink/Binding versions to properly handle "raw API keys" (access keys without information like satellite or encryption embedded) for "satellite-managed-encryption" projects.
+
+These changes are technically unnecessary if the UI is updated to not provide raw API keys for satellite-managed-encryption projects. However, it may be useful to make these changes to Uplink so that future versions of Uplink can use raw API keys even for satellite-managed-encryption projects.
 
