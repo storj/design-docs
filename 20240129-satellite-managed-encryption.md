@@ -9,7 +9,7 @@ tags: ["satellite", "satellite/console", "encryption"]
 
 Date: 2024-01-29
 
-Owner: mobyvb
+Owners: mobyvb, wilfred-asomanii
 
 Accountable:
 - Console squad
@@ -156,5 +156,5 @@ The only difference from the Key Management System section above is that we don'
 
 This will allow new Uplink/Binding versions to properly handle "raw API keys" (access keys without information like satellite or encryption embedded) for "satellite-managed-encryption" projects.
 
-These changes are technically unnecessary if the UI is updated to not provide raw API keys for satellite-managed-encryption projects. However, it may be useful to make these changes to Uplink so that future versions of Uplink can use raw API keys even for satellite-managed-encryption projects.
+**These changes are technically unnecessary if the UI is updated to not provide raw API keys for satellite-managed-encryption projects. However, it may be useful to make these changes to Uplink so that future versions of Uplink can use raw API keys even for satellite-managed-encryption projects.**
 
