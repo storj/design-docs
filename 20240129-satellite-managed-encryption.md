@@ -71,7 +71,8 @@ However, there are [security considerations](https://github.com/GoogleCloudPlatf
 #### Satellite Project Updates
 
 A new column should be added to the `projects` table to be the passphrase store, like `projects.passphrase_enc`. This should be the encrypted passphrase for satellite-managed-encryption projects only and `null` for others.
-Projects that are created before this feature is deployed and projects created after but opt out should have `null` in this column.
+Projects that are created before this feature is deployed and projects created after but opt out should have `null` in this column. Another column, `projects.path_encryption` should be added table to indicate whether path encryption is enabled for the project.
+For the purpose of this design, projects that are satellite managed will have this column set to `true`.
 
 Functionality should then be added to allow creating a project with a satellite managed encryption passphrase:
 * the console service receives a request to create a project
