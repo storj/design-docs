@@ -16,8 +16,8 @@ Accountable:
 
 Consulted:
 - Product
-- Delivery (TODO)
-- Satellite (TODO)
+- Delivery
+- Satellite
 
 Informed:
 - Engineering
