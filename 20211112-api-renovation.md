@@ -58,7 +58,7 @@ Feature list:
 
 ## Rationale
 
-We [experimented a little](https://github.com/xaresys/storj-api-gen) with writing our own custom code generator. The process was straightforward and gave us an idea of how to proceed with API generation. Although there are pre-existing API code generators, we will build a custom one for the sake of flexibility and ease of maintenance.
+We experimented a little with writing our own custom code generator. The process was straightforward and gave us an idea of how to proceed with API generation. Although there are pre-existing API code generators, we will build a custom one for the sake of flexibility and ease of maintenance.
 
 ## Implementation
 
