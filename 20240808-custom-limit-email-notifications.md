@@ -24,7 +24,7 @@ Informed:
 
 ### Context
 
-Pro users are currently able to set customized project limits for storage and egress. Right now, the only way for a user to check how close they are to their limitsi is to go to the project dashboard in the satellite UI. A user could also learn about exceeding their limits when uploads or downloads begin failing, but there is no advance notice in this case.
+Pro users are currently able to set customized project limits for storage and egress. Right now, the only way for a user to check how close they are to their limits is to go to the project dashboard in the satellite UI. A user could also learn about exceeding their limits when uploads or downloads begin failing, but there is no advance notice in this case.
 
 The purpose of "Project Limit Notification Emails" is to inform users automatically when they are getting close to, or exceeding their custom limits.
 
@@ -35,19 +35,15 @@ The purpose of "Project Limit Notification Emails" is to inform users automatica
 
 ### Approach / Design
 
-There are two functional components of this design:
-1. Limit threshold detection
-    * can be done at the time of usage (e.g. when metainfo processes a request)
-    * can be done on some schedule (e.g. inside a satellite chore)
-2. Notification sending
-    * can be event-based (e.g. send emails as soon as items are added to a queue)
-    * can be done on some schedule (e.g. inside a satellite chore)
-
 Things we want to avoid:
 * unintentionally sending multiple emails per "threshold event" (e.g. storage usage on project abc has exceeded 80% of the custom limit)
 * failing to send an email for a "threshold event" (e.g. satellite restart at the same time as threshold event, resulting in dropped communications)
 
 These constraints require that we make some DB updates.
+
+#### Config Updates
+
+A single feature flag should be added on the satellite to enable "limit threshold email notifications". It should default to be turned off, until it is turned on in production.
 
 #### DB Updates
 
@@ -81,7 +77,7 @@ const (
   */
 )
 
-func NewProjectNotificationFlags(dbVal int) *ProjectNotificationFlags {
+func ProjectNotificationFlagsFromInt(dbVal int) *ProjectNotificationFlags {
 	p := &ProjectNotificationFlags{}
 	if storage80Filter&dbVal > 0 {
 		p.StorageExceeded80 = true
@@ -108,15 +104,9 @@ func (p *ProjectNotificationFlags) Int() int {
 
 If we use this approach, we only need to add a single updatable int column to the projects table, and since int has 32 bits, we would also be able to support any other similar flags we might want in the future, without schema changes.
 
-Besides tracking that whether each of these threshold event emails was sent, if we go with "Option 2" below, we may also need to add a new table, similar to the `node_events` table. It could be called `project_events`, and needs the following columns:
-* project ID
-* event type - probably an int - could be related to the Go type defined above
-* created_at time
-* TODO: possibly other fields that could provide supplementary information that should be included in the email (e.g. what custom limits are at the time of the email)
+#### Event detection and email sending in a chore
 
-#### Option 1: Detect Events in a Chore
-
-This option involves adding a new chore to the satellite core, with the goal of detecting "threshold events" and sending emails.
+We will add a new chore to the satellite core, with the goal of detecting "threshold events" and sending emails.
 
 The chore would:
 
@@ -141,28 +131,9 @@ Pros:
 
 Cons:
 
-* Timeliness of emails depends on how often the chore runs - there is likely to be more of a delay as compared to "Option 2", described below.
-
-#### Option 2: Detect Events During Metainfo Validation
-
-(TODO moby): move to alternatives considered
-
-Metainfo already checks project bandwidth and storage limits against user's custom limits (if they are set). For this reason, it may make sense to add rows to the `project_events` table described above from metainfo, when the project usage for storage or egress exceeds the thresholds 80% or 100%.
-
-Pros:
-
-* emails will be more timely - user will get notified very close to when they hit the thresholds 
-
-Cons:
-
-* adds additional work for metainfo to do; performance might be fine, but it might also be preferable to avoid touching metainfo
-* requires `project_events` table for queue tracking/deduplication
-* race condition with multiple API pods: events need to be deduplicated to avoid sending two emails for the same event
-* still requires a non-metainfo service to process events and send emails (on the satellite core) - similar to the chore described in "option 1"
+* Timeliness of emails depends on how often the chore runs - see "alternatives considered" for more info about why we did not choose a more "responsive" method
 
 #### Summary
-
-Two slightly different approaches are detailed above, but based on the tradeoffs discussed, we think it would be preferable to implement the "chore" solution (Option 1). This would entail:
 
 * Updating projects table schema to have flags indicating when emails were sent
 * Adding a chore on the satellite core to detect when emails need to be sent, send emails, and keep flags pertaining to project notifications in the DB up to date
@@ -171,9 +142,10 @@ Two slightly different approaches are detailed above, but based on the tradeoffs
 
 ### Anti-goals
 
-* impacting metainfo performance (e.g. by running queries that could cause contention in tables that metainfo relies on)
+* impacting metainfo performance
 * sending excessive limit notifications (only one email for 80% and one for 100%, per limit per project)
 * failing to send a limit notification when the user passes the 80% or 100% threshold
+* sending emails to users who have not set custom limits
 
 ### Alternatives considered
 
@@ -186,16 +158,24 @@ Two slightly different approaches are detailed above, but based on the tradeoffs
     * not dependent on satellite release cycle (quicker to set up/test/adjust)
     * more access/specialized knowledge required for maintenance - satellite code is more "accessible"
     * likely requires two separate third-parties - one to do queries, and one to send emails. If we go with existing tools for these, the task my require cross-team work with datascience and/or marketing.
-
+3. Detect "threshold events" during metainfo validation, at the time of usage
+    * emails would not be delayed due to chore intervals; they would be sent close to when the 80% or 100% threshold was exceeded
+    * could potentially have an impact on metainfo performance
+    * requires an additional database table (e.g. `project_events`) to track queue of events to send emails for
+    * race condition introduced with multiple API pods: events need to be deduplicated to avoid sending two emails for the same event
+    * still requires a central core service outside the API pod to handle processing the email queue and sending emails
 
 ### Open questions
+
+* should thresholds be configurable on the satellite? Or are we okay "hardcoding" to 80% and 100%?
+* what future improvements might we want to make to this feature, and does the current design inhibit that? E.g. will we ever want the user to be able to customize the thresholds for which they will get emailed?
 
 ### Test plan
 
 Test cases:
 
 * for each limit type (storage, egress):
-    * no custom limit: no email should be received
+    * no custom limit: no email should be received, even when limit is hit
     * custom limit * 80% < current usage < custom limit: one 80% email should be received; no duplicates
     * custom limit <= current usage: one 100% email should be received; no duplicates
     * after email is received, increase custom limit so that threshold is no longer met. When new threshold is met, a new email should be sent
@@ -204,6 +184,8 @@ Test cases:
 ### Rollout
 
 After we verify the emails work as intended in QA, we simply need to turn the feature on in production.
+
+After the feature is turned on in production, we can change the feature to be enabled by default.
 
 ### Rollback
 
