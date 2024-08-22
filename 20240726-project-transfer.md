@@ -45,6 +45,7 @@ These items must all be true for a project transfer to be processed:
 * current owner verifies via email that they approve the transfer of ownership
 * new owner verifies via email that they approve the transfer of ownership, including billing responsibilities for the project
 * neither user is frozen
+* there is not a project transfer request in-progress for this project
 
 #### Results of transfer:
 
@@ -59,18 +60,19 @@ The project owner will navigate to the "project settings" page in the satellite 
 UI flow (current owner):
 
 * click "transfer project"
-* if any of the owner prerequisits fail (unpaid invoices or user is frozen), display a message to the user informing them about what they need to do to transfer a project
-* if prerequisites for owner pass, dialog is displayed asking for the email of the account which should become the new project owner - click "continue"
-* send owner a 6-digit code via email, which they input into the dialog in the UI - click "continue"
-* display success message informing the owner that an email has been sent to the new owner with instructions for completing the transfer
+  - if there is already a transfer request in-progress, the current owner or new owner associated with that transfer request must cancel/decline it before this option is available
+* if any of the current owner prerequisites fail (unpaid invoices or user is frozen), display a message to the user informing them about what they need to do to transfer a project
+* if prerequisites for current owner pass, dialog is displayed asking for the email of the account which should become the new project owner - click "continue"
+* send current owner a 6-digit code via email, which they input into the dialog in the UI - click "continue"
+* display success message informing the current owner that an email has been sent to the new owner with instructions for completing the transfer
 
 UI flow (new owner):
 
 * on all projects dashboard, the project being transferred appears with some action like "complete transfer" (needs design)
-* if any of the transferee prerequisites fail (unpaid invoices, project limit, free tier, or user is frozen), display a message to the user informing them about what they need to do to complete the transfer
-* if transferee prerequisites pass, dialog is displayed informing the user that by completing the transfer, they will be responsible for paying for usage on the project - click "confirm/continue"
-* send transferee a 6-digit code via email, which they input into the dialog in the UI - click "continue"
-* display success message informing the transferee that the project has been successfully transferred. Send confirmation emails to both the transferer and transferee.
+* if any of the new owner prerequisites fail (unpaid invoices, project limit, free tier, or user is frozen), display a message to the user informing them about what they need to do to complete the transfer
+* if new owner prerequisites pass, dialog is displayed informing the user that by completing the transfer, they will be responsible for paying for usage on the project - click "confirm/continue"
+* send new owner a 6-digit code via email (a different code than was sent to the old owner), which they input into the dialog in the UI - click "continue"
+* display success message informing the new owner that the project has been successfully transferred. Send confirmation emails to both the transferer (old owner) and transferee (new owner).
 
 
 #### Emails
@@ -84,12 +86,12 @@ UI flow (new owner):
 The things that need to be tracked in the DB:
 
 * project ID to transfer
-* user ID of transferer
-* user ID of transferee
-* verification code for transferer
-* verification code for transferee
+* user ID of transferer (old owner)
+* user ID of transferee (new owner)
+* verification code for transferer (old owner)
+* verification code for transferee (new owner)
 
-We could create a new table for this (e.g. `project_transfer_requests`) - which might be overkill if it is not a commonly-used feature. Otherwise, we could modify the existing `project_invitations` table, which already has `inviter_id` and `email` (recipient's email address). If we want to use `project_invitations`, we would need to add some column like `invitation_type` to distinguish "invitation to become a project member" vs. "invitation to transfer ownership", as well as the verification codes for confirming that the email-owners involved in the transfer consent to the transfer.
+We should create a new table for this, e.g. `project_transfer_requests`.
 
 ## Disclaimers
 
