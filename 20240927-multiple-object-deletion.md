@@ -103,9 +103,8 @@ message DeleteObjectsResponseDeletedItem {
 
 message DeleteObjectsResponseErrorItem {
     int32 code = 1;
-    string message = 2;
-    bytes encrypted_object_key = 3;
-    bytes object_version = 4;
+    bytes encrypted_object_key = 2;
+    bytes object_version = 3;
 }
 ```
 
