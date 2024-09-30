@@ -7,7 +7,7 @@ tags: [ "gateway", "satellite", "satellite/metainfo", "uplink" ]
 
 ### Header
 
-Date: 2024-09-24
+Date: 2024-09-27
 
 Owner: Jeremy Wharton
 
