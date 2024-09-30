@@ -30,6 +30,8 @@ This approach has several issues:
 
 - Rate limiting: Each deletion request counts against the deletion rate limit of the project associated with the request. This reduces the amount of deletion operations that can be performed within a given time frame. Additionally, this may cause bulk deletions to fail partway if the rate limit is reached mid-operation.
 
+- Database overhead: Each deletion involves the execution of a separate SQL query, increasing the load on the database as the object count grows. Implementing bulk deletions gives us the opportunity to batch queries or delete multiple objects in a single query, reducing database overhead.
+
 For further context, the gateway currently supports Amazon S3's [DeleteObjects](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjects.html) operation, which allows for the deletion of multiple objects with a single HTTP request. However, the lack of native support for bulk deletions in the metainfo RPC service makes this operation subject to the aforementioned issues, as the gateway must translate every S3 request to a series of RPC requests.
 
 ### Goals
