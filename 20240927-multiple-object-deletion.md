@@ -47,6 +47,8 @@ Requests directed to this endpoint must contain the following information:
 - The requester's API key
 - The bucket from which objects will be deleted
 - An indication of whether governance mode Object Lock restrictions should be bypassed
+- An indication of whether quiet mode should be enabled.
+  - With quiet mode enabled, only errors are returned; information about successful deletions is omitted from responses. Supporting this mode would allow us to save bandwidth on clients that use it.
 - A list of objects to delete
 
 The endpoint must respond with the following information:
@@ -82,7 +84,8 @@ message DeleteObjectsRequest {
 
     bytes bucket = 1;
     bool bypass_governance_retention = 2;
-    repeated DeleteObjectsRequestItem items = 3;
+    bool quiet = 3;
+    repeated DeleteObjectsRequestItem items = 4;
 }
 
 message DeleteObjectsRequestItem {
