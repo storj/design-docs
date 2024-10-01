@@ -51,7 +51,7 @@ Requests directed to this endpoint must contain the following information:
 - An indication of whether governance mode Object Lock restrictions should be bypassed
 - An indication of whether quiet mode should be enabled.
   - With quiet mode enabled, only errors are returned; information about successful deletions is omitted from responses. Supporting this mode would allow us to save bandwidth on clients that use it.
-- A list of objects to delete
+- A list of up to 1000 objects to delete
 
 The endpoint must respond with the following information:
 
@@ -63,6 +63,8 @@ The endpoint must respond with the following information:
   - An error code
   - The object's key
   - The object's version ID (if it was provided in the request)
+
+Each bulk object deletion request will count as a single operation against the requester's deletion rate limit as opposed to each individual object deletion being counted separately.
 
 #### Libuplink
 
@@ -96,8 +98,8 @@ message DeleteObjectsRequestItem {
 }
 
 message DeleteObjectsResponse {
-	repeated DeleteObjectsResponseDeletedItem deleted = 1;
-	repeated DeleteObjectsResponseErrorItem errors = 2;
+    repeated DeleteObjectsResponseDeletedItem deleted = 1;
+    repeated DeleteObjectsResponseErrorItem errors = 2;
 }
 
 message DeleteObjectsResponseDeletedItem {
@@ -123,6 +125,8 @@ An alternative to the design described in this document is to implement a separa
 
 ### Open questions
 
+Instead of immediately deleting objects, it may be more performant to mark them for later deletion by a garbage collection process, potentially reducing satellite database load. Further investigation is necessary to determine the feasibility and impact of this strategy.
+
 ## Reminders
 
 ### Security / Privacy
@@ -137,16 +141,23 @@ Customers may enable [bucket logging](https://storj.dev/dcs/buckets/bucket-loggi
 
 ### Test plan
 
-Tests for this design should confirm all of the following statements:
+Tests for this design should confirm the veracity of all of the following statements:
 
 - If the bucket is versioned and the version ID of an object isn't specified, a delete marker will be placed at the object's location, and no deletions will occur. This will be the case even if there isn't an object version at the location.
+
 - If the bucket has versioning suspended and the version ID of an object isn't specified, a delete marker will be placed at the object's location. If there's an object version at the location, it will be deleted.
-- If the bucket is unversioned and the version ID of an object isn't specified, the object will be deleted without the insertion of a delete marker at its location. If no object exists at the location, an error will be returned.
+
+- If the bucket is unversioned, the object will be deleted without the insertion of a delete marker at its location. No error is returned if an object does not exist at the location.
+
 - If a legal hold has been placed on an object, it must not be deleted under any circumstance.
+
 - If the object has an active retention period, deletion should only succeed if it is locked under governance mode, the requester indicates that governance mode restrictions should be bypassed, and the requester is authorized to bypass governance mode restrictions.
+
 - If the number of objects to delete exceeds 1000, then none of them should be deleted, and an error must be returned.
 
-The following apply only to the gateway:
+- If the request had quiet mode enabled, information about successful deletions is omitted from the response.
+
+The following applies only to the gateway:
 
 - The HTTP status code returned by the gateway's `DeleteObjects` endpoint must be `200 OK` unless the request itself fails to be processed. Individual object deletion failures should not affect the status code.
 
