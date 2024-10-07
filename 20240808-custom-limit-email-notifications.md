@@ -160,7 +160,13 @@ The `event` field here is an int, which can be set to the `ProjectNotificationKi
 
 #### Event detection in metainfo:
 
-The general idea of event detection in metainfo:
+The general idea of event detection in metainfo is to perform an additional check during limit validation on new uploads and downloads. Here, we are detecting two main categories of events:
+1. Before the upload/download, the threshold criteria was not met, and afterwards, the threshold criteria is met:
+    * enqueue an event to the project notifications queue indicating that an email should be sent to the user
+2. The threshold criteria was met at some point in the past (as indicated by project flags), but after the upload/download, the threshold criteria is not met:
+    * enqueue an event to the project notifications queue indicating that the notifications flag should be reset for the relevant threshold 
+
+More specifically, 
 
 When limit validation occurs for an upload:
 * for segment and custom storage limits:
@@ -168,29 +174,44 @@ When limit validation occurs for an upload:
     * if this upload causes usage to meet or cross threshold:
       - enqueue `(projectID, thresholdEventKind)` to `project_events`
       - skip checking lower thresholds
+	* if usage is below the threshold, but the project is flagged indicating that the threshold was exceeded:
+      - enqueue `(projectID, thresholdEventKind)` to `project_events` ("threshold event kind" would indicate to reset the flag with no notification)
 
 When limit validation occurs for a download:
 * for each limit threshold (starting at highest threshold):
   * if this download causes egress to meet or cross custom egress threshold: 
     - enqueue `(projectID, thresholdEventKind)` to `project_events`
     - skip checking lower thresholds
+  * if egress usage is below the custom threshold, but the project is flagged indicating that the threshold was exceeded:
+    - enqueue `(projectID, thresholdEventKind)` to `project_events` ("threshold event kind" would indicate to reset the flag with no notification)
 
-TODO: metainfo probably needs to reset `project.threshold_events` when the conditions for threshold events are no longer met (e.g. rolling into a new billing period brings egress usage down to 0).
+While the intended behavior for event detection is straightforward, implementation may be tricky. As an example, metainfo validates whether upload limits would be exceeded for a new object in the metainfo package [here](https://github.com/storj/storj/blob/8d9fab8825e92c4c77252e3891530e5d04c430eb/satellite/metainfo/validation.go#L574) - calling a function `ExceedsUploadLimits` in accounting/projectusage.go [here](https://github.com/storj/storj/blob/b552501c39352ba80487b6991975e8d13f549410/satellite/accounting/projectusage.go#L125). The project usage service retrieves the current storage and segment usage from a [redis cache](https://github.com/storj/storj/blob/b552501c39352ba80487b6991975e8d13f549410/satellite/accounting/live/redis.go#L66) in accounting/live/redis.go.
+
+Our current live accounting project usage behavior is designed to allow for very quickly getting and updating a handful of values per project (specific limits and corresponding usage) with minimal DB calls.
+
+We need to have additional information during limit validation to properly queue events: the `threshold_events` flags from the `projects` table. This is because we not only need to check (1) is current usage above or below the threshold? We also need to check (2) has a notification been triggered for this threshold before?
+
+This additional information could be merged into the live accounting redis cache. This would likely be the most optimal/efficient, but at the risk of changing the responsibilities of the live accounting package.
+
+If we don't add additional information to the live accounting cache (or some other cache), it requires making a query to the `projects` table for the `threshold_events` flag - something we want to avoid to keep metainfo as efficient as possible.
 
 #### Queue processing in core:
 
 Create a chore on the satellite (or update existing console emailreminders chore):
 * loop:
   * select all unprocessed events for one project in the `project_events` table, which were created before `now-emailTimeBuffer`, where `emailTimeBuffer` comes from the satellite config.
-    * deduplicate events: send only one email per event per threshold
-    * check if emails have been sent for these threshold events in `project.threshold_events`. If they have, mark as processed or delete relevant rows from `project_events` without sending an email. If they haven't, send email(s) to project owner, mark `project_events` row as processed, and update `project.threshold_events` accordingly
+    * for "threshold exceeded"-type events:
+      * deduplicate events: send only one email per event per threshold
+      * check if emails have been sent for these threshold events in `project.threshold_events`. If they have, mark as processed or delete relevant rows from `project_events` without sending an email. If they haven't, send email(s) to project owner, mark `project_events` row as processed, and update `project.threshold_events` accordingly
+	* for "reset threshold"-type events:
+	  * check if `project.threshold_events` indicates that a notification was sent for this limit type. If it has, reset it to indicate "not sent". If the value is already reset, discard/mark the `project_events` row as processed, and proceed with no further action.
 
 #### Summary
 
 * Update projects table schema to have flags indicating when emails were sent
 * Add "project events" table to preserve unsent limit threshold events
 * Update metainfo limit validation to queue limit threshold events to the DB
-* Add a chore on the satellite core to process limit threshold event queues: deduplicate events for each project, send emails for the events, and update the DB to indicate that the emails were sent
+* Add a chore on the satellite core to process limit threshold event queues: deduplicate events for each project, send emails for the events (if applicable), and update the DB accordingly
 
 ## Disclaimers
 
