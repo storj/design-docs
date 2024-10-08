@@ -1,7 +1,7 @@
 tags: [ "gateway", "satellite", "satellite/metainfo", "uplink" ]
 ---
 
-# Multiple Object Deletion
+# Bulk Object Deletion
 
 ## Essentials
 
@@ -68,11 +68,11 @@ Each bulk object deletion request will count as a single operation against the r
 
 #### Libuplink
 
-Libuplink must provide a method through which the satellite metainfo RPC service's multiple object deletion endpoint is contacted. This is necessary for the gateway to function.
+Libuplink must provide a method through which the satellite metainfo RPC service's bulk object deletion endpoint is contacted. This is necessary for the gateway to function.
 
 #### Gateway
 
-The gateway must be given a configuration option that indicates whether the new multiple object deletion feature should be used. When it is enabled, it must invoke the new Libuplink method.
+The gateway must be given a configuration option that indicates whether the new bulk object deletion feature should be used. When it is enabled, it must invoke the new Libuplink method.
 
 #### Protobuf
 
@@ -131,7 +131,7 @@ Instead of immediately deleting objects, it may be more performant to mark them 
 
 ### Security / Privacy
 
-The same security and privacy considerations that apply to the existing single-object deletion implementation must apply to the multiple object deletion implementation. We must ensure that the client is unable to delete any objects for which deletion is not permitted by its API key. Additionally, Object Lock restrictions must be obeyed.
+The same security and privacy considerations that apply to the existing single-object deletion implementation must apply to the bulk object deletion implementation. We must ensure that the client is unable to delete any objects for which deletion is not permitted by its API key. Additionally, Object Lock restrictions must be obeyed.
 
 ### Observability
 
