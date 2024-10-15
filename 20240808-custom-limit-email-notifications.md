@@ -103,8 +103,8 @@ model project_event (
 	key id
 
 	index (
-		name project_events_id_created_at_index
-		fields project_id created_at
+		name project_id_created_at_last_attempted_index
+		fields project_id created_at last_attempted
 		where project_event.email_sent = null
 	)
 
