@@ -42,6 +42,8 @@ The goal of the implementation described by this document is to allow multiple o
 
 #### Satellite
 
+##### Metainfo RPC service
+
 The satellite metainfo RPC service must be extended with an endpoint allowing for the deletion of multiple objects in a single request.
 
 Requests directed to this endpoint must contain the following information:
@@ -65,6 +67,42 @@ The endpoint must respond with the following information:
   - The object's version ID (if it was provided in the request)
 
 Each bulk object deletion request will count as a single operation against the requester's deletion rate limit as opposed to each individual object deletion being counted separately.
+
+##### Metainfo Database
+
+Currently bulk object deletion currently results in the execution of a single deletion query for each object that was requested to be deleted.
+
+```sql
+-- Postgres, Cockroach
+DELETE *
+FROM objects
+WHERE (project_id, bucket_name, object_key, version) = ($1, $2, $3, $4)
+
+-- Spanner
+DELETE *
+FROM objects
+WHERE (project_id, bucket_name, object_key, version) = (@project_id, @bucket_name, @object_key, @version)
+```
+
+Instead, objects should be deleted in a manner similar to the following code, where the object key and version pairs are provided to the query:
+
+```sql
+-- Postgres, Cockroach
+DELETE *
+FROM objects
+WHERE
+  (project_id, bucket_name) = ($1, $2)
+  AND (object_key, version) IN (
+    SELECT UNNEST($3::BYTEA[]), UNNEST($4::INT8[])
+  )
+
+-- Spanner
+DELETE *
+FROM objects
+WHERE
+  (project_id, bucket_name) = (@project_id, @bucket_name)
+  AND STRUCT<ObjectKey BYTES, Version INT4>(object_key, version) IN UNNEST(@objects_to_delete)
+```
 
 #### Libuplink
 
@@ -122,6 +160,19 @@ message DeleteObjectsResponseErrorItem {
 ### Alternatives considered
 
 An alternative to the design described in this document is to implement a separate rate limit specifically for bulk object deletion operations. However, bulk deletion operations could still fail partway through due to hitting the bulk deletion-specific rate limit, even though other operations would remain unaffected. In addition, unnecessary bandwidth consumption would remain an issue, as each object deletion would still require a separate request.
+
+we could recycle request and reponse types of BeginDeleteObject
+would minimize changes to protobuf
+however, would require:
+- extending request with quiet mode
+  - semantics messed up since this means BeginDeleteObject would need to support quiet mode in addn. to DeleteObjects
+- extending response with err code
+  - would be unused for BeginDeleteObject
+
+batching thing not used because
+- ease of implementation?
+- semantics?
+- separation of concerns?
 
 ### Open questions
 
