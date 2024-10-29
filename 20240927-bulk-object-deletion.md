@@ -88,8 +88,7 @@ Instead, objects should be deleted in a manner similar to the following code, wh
 
 ```sql
 -- Postgres, Cockroach
-DELETE *
-FROM objects
+DELETE FROM objects
 WHERE
   (project_id, bucket_name) = ($1, $2)
   AND (object_key, version) IN (
@@ -97,8 +96,7 @@ WHERE
   )
 
 -- Spanner
-DELETE *
-FROM objects
+DELETE FROM objects
 WHERE
   (project_id, bucket_name) = (@project_id, @bucket_name)
   AND STRUCT<ObjectKey BYTES, Version INT64>(object_key, version) IN UNNEST(@objects_to_delete)
