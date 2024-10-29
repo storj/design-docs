@@ -101,7 +101,7 @@ DELETE *
 FROM objects
 WHERE
   (project_id, bucket_name) = (@project_id, @bucket_name)
-  AND STRUCT<ObjectKey BYTES, Version INT4>(object_key, version) IN UNNEST(@objects_to_delete)
+  AND STRUCT<ObjectKey BYTES, Version INT64>(object_key, version) IN UNNEST(@objects_to_delete)
 ```
 
 #### Libuplink
@@ -159,20 +159,12 @@ message DeleteObjectsResponseErrorItem {
 
 ### Alternatives considered
 
-An alternative to the design described in this document is to implement a separate rate limit specifically for bulk object deletion operations. However, bulk deletion operations could still fail partway through due to hitting the bulk deletion-specific rate limit, even though other operations would remain unaffected. In addition, unnecessary bandwidth consumption would remain an issue, as each object deletion would still require a separate request.
+- An alternative to the design described in this document is to implement a separate rate limit specifically for bulk object deletion operations. However, bulk deletion operations could still fail partway through due to hitting the bulk deletion-specific rate limit, even though other operations would remain unaffected. In addition, unnecessary bandwidth consumption would remain an issue, as each object deletion would still require a separate request.
 
-we could recycle request and reponse types of BeginDeleteObject
-would minimize changes to protobuf
-however, would require:
-- extending request with quiet mode
-  - semantics messed up since this means BeginDeleteObject would need to support quiet mode in addn. to DeleteObjects
-- extending response with err code
-  - would be unused for BeginDeleteObject
-
-batching thing not used because
-- ease of implementation?
-- semantics?
-- separation of concerns?
+- An alternative to introducing dedicated request and response types for the bulk object deletion method is reusing the types associated with the single object deletion method, updating them as necessary. The satellite would be able to distinguish a single deletion request from a bulk one by determining whether the request protobufs were sent individually or batched, respectively. However, this presents several issues:
+  - The request type must be extended with a field indicating whether quiet mode is enabled. If we choose to implement this functionality for single object deletion, it would remain unused indefinitely because we have no application that would leverage it; if we don't, the request type's semantics are weakened, having been made dependent on the type of deletion being requested.
+  - The response type must be extended with a field indicating the status of the deletion. This would remain unused for our single object deletion implementation because we instead return RPC errors for deletion failures.
+  - Reusing the single object deletion types may limit extensibility. As the differences between single and bulk deletion increase, issues similar to those previously mentioned will arise. If we later decide to factor out the bulk deletion fields into their own request and response types, we'll have to maintain compatibility with the old bulk deletion format.
 
 ### Open questions
 
