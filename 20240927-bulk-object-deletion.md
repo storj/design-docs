@@ -74,13 +74,11 @@ Currently bulk object deletion currently results in the execution of a single de
 
 ```sql
 -- Postgres, Cockroach
-DELETE *
-FROM objects
+DELETE FROM objects
 WHERE (project_id, bucket_name, object_key, version) = ($1, $2, $3, $4)
 
 -- Spanner
-DELETE *
-FROM objects
+DELETE FROM objects
 WHERE (project_id, bucket_name, object_key, version) = (@project_id, @bucket_name, @object_key, @version)
 ```
 
