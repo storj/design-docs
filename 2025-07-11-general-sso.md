@@ -220,6 +220,9 @@ We do not need to change the `EmailProviderMappings` configuration, as general p
   - a user already linked to an enterprise SSO provider should not be able to unlink from the provider.
   - a user with an email matching an enterprise SSO provider should not be able to log in with general SSO or password.
 - Password reset/change functionality
+- Email change functionality for general SSO users
+  - Changing email should unlink the SSO account.
+  - Users without a password should be forced to set a password before changing their email.
 - Account deletion functionality
 
 ## Implementation Tickets
@@ -229,7 +232,9 @@ We do not need to change the `EmailProviderMappings` configuration, as general p
   - General providers are identified by the "general-" prefix.
   - Update the /api/v0/auth/sso/url endpoint to return general SSO options when no enterprise provider matches the email.
   - Update restrictions to allow general SSO users to access functionality current SSO are not allowed to access,
-    such as change/reset password and delete account flows, except changing email.
+    such as change/reset password and delete account flows including changing email.
+    - SSO should be unlinked once the user changes their email address.
+    - Password should be forced to be set before changing email if the user has no password set.
 
 2. **[SATELLITE UI] Update Login/Sign up Flow**
   - For each general SSO provider, received from the /sso/url endpoint,
@@ -247,10 +252,7 @@ We do not need to change the `EmailProviderMappings` configuration, as general p
   - Add the client ID and secret to the `STORJ_SSO_OIDC_PROVIDER_INFOS` configuration
 
 ## Open Questions
-* Should we allow general SSO users to change their email?
 * Should we store state tokens in the db instead of cookies?
-* Should we require extra validation for linking a general SSO account to an existing user?
-  * What happens if a user's SSO provider account is compromised? Account linking should be secure and reversible
 
 ## Out of Scope
 This MVP focuses on Google SSO as the only general provider. Setting up other providers is trivial since the architecture
