@@ -119,18 +119,38 @@ This does not include changing email.
 ##### Current Authentication Flow on the Satellite UI
 
 The existing login flow in the satellite console follows this pattern:
-1. User enters email address in the login form
+1. User enters email address in the login/sign up form
 2. System checks for enterprise SSO provider
-3. If enterprise SSO is available, user is redirected when they click "Continue"
+3. If enterprise SSO is available, user is redirected to the provider's authentication page when they click "Continue"
+   * By design, if the user logs in with an enterprise SSO provider, but the provided account is not linked to an existing
+     satellite account, the satellite account with the same email address is linked to the SSO account. If there is no existing
+     satellite account with that email, a new satellite account is created and linked to the SSO account.
 4. Otherwise, user enters their password in the now visible password field.
 
 For General SSO, we'll modify this flow to present SSO options alongside the password field when no enterprise provider is found.
 The user will click any of the options, e.g., "Sign in with Google", which will redirect them to the OAuth2 flow for the
-`general-google` provider. The flow remains largely the same, but with an additional step for provider selection.
+`general-google` provider. The flow remains largely the same, but with an additional step for provider selection and the following
+differences:
 
-* General SSO users should still be able to access the email/password authentication flow if they prefer.
-* So a previously password-authenticated user will be linked to their SSO account once they sign in with that, similar to the current implementation.
-* A user created after an SSO flow will be able to go account settings to set a password for their account.
+* General SSO users will still be able to access the email/password authentication flow if they prefer.
+* If the user logs in with a general SSO provider, and there is not an already linked satellite account with the same email,
+  log in will fail.
+* If the user signs up via a general SSO provider, and there already is a linked satellite account to that SSO account,
+  the user will be logged in to that account.
+* If the user signs up via a general SSO provider, and there is no (linked) satellite account to that SSO account,
+  a new satellite account will be created and linked to the SSO account.
+* If the user signs up via a general SSO provider, and there is an existing satellite account with the same email,
+  sign up will fail.
+* Account linking and unlinking will only be done from the account settings page for general SSO users.
+  * Enterprise SSO users cannot unlink their SSO accounts or link to a General SSO provider.
+* If a user logs in/signs up with an enterprise SSO provider, the matching satellite account will be linked to the SSO account
+  regardless of whether it is already linked to a general SSO account or not.
+
+##### UI Changes
+The Satellite UI will need to be updated to support the new General SSO flow. The main changes include:
+* **Login Page**: Update the login page to show a "Sign in with Google" button alongside the password field when no enterprise SSO provider is found.
+* **Account Settings**: Allow general SSO users to manage their accounts fully, including setting a password, changing it, and deleting their account.
+  * Have UI elements to link/unlink general SSO accounts, IF there are General SSO providers available (just Google for now).
 
 #### API Endpoints
 **GET /api/v0/auth/sso/url?email=user@example.com**
@@ -143,6 +163,29 @@ type SSOProvidersResponse struct {
     General    []string `json:"general"`
 }
 ```
+
+##### Updated SSO Flow (General SSO)
+
+###### Linking from Account Settings
+
+1. User signs up with email and password.
+2. User logs in to the new account with email and password.
+3. User goes to account settings and clicks "Link Google Account".
+4. If the user has MFA enabled, they will be prompted for it.
+5. UI makes request to `GET /api/v0/auth/sso/url?email=user@example.com` for the Google SSO URL.
+6. User is redirected to the Google OAuth2 flow.
+7. On successful authentication, the user is redirected back to the Satellite with an authenticated session.
+8. User can now subsequently log in with the Google SSO account.
+
+###### Sign Up with General SSO
+
+1. User enters email address in the sign up form.
+2. UI makes request to `GET /api/v0/auth/sso/url?email=user@example.com` for SSO URLs.
+3. If no enterprise SSO provider matches the email, the UI shows a "Sign up with Google" button if that is available.
+4. User clicks "Sign up with Google" and gets redirected to the Google OAuth2 flow.
+5. On successful authentication, the user is redirected back to the Satellite with an authenticated session.
+6. User can now go to account settings to set a password.
+
 
 #### Configuration
 The current SSO configuration is as such;
@@ -164,16 +207,20 @@ We do not need to change the `EmailProviderMappings` configuration, as general p
 
 #### What to Test
 - **Google OAuth2 flow**: we have to make sure the Google SSO flow works correctly;
-  - log in to an existing account (account linking)
-  - log in to a new account
+  - link a satellite account to a Google SSO account
+  - log in to the UI with the Google SSO account
+  - unlink the Google SSO account from the satellite account
+  - log in with the Google SSO account again should fail
+  - sign up with that same Google SSO account should fail
+  - sign up with a different Google SSO account should create a new satellite account
 - **Enterprise SSO flow**: test that all existing enterprise SSO flows continue to work as expected.
 - **Enterprise SSO precedence**:
   - a user with an email matching an enterprise SSO provider should always be redirected to that provider, even if general SSO is available.
-  - a user already linked to an enterprise SSO provider should not be able to log in with general SSO or password or vice versa.
+  - a user already linked to an enterprise SSO provider should not be able to log in with General SSO or password.
+  - a user already linked to an enterprise SSO provider should not be able to unlink from the provider.
   - a user with an email matching an enterprise SSO provider should not be able to log in with general SSO or password.
 - Password reset/change functionality
 - Account deletion functionality
-- Account linking
 
 ## Implementation Tickets
 
@@ -184,11 +231,12 @@ We do not need to change the `EmailProviderMappings` configuration, as general p
   - Update restrictions to allow general SSO users to access functionality current SSO are not allowed to access,
     such as change/reset password and delete account flows, except changing email.
 
-2. **[SATELLITE UI] Update Login Flow UI**
+2. **[SATELLITE UI] Update Login/Sign up Flow**
   - For each general SSO provider, received from the /sso/url endpoint,
     add a button that redirects to that provider's authentication flow.
 
 3. **[SATELLITE UI] Allow general SSO users to manage their account fully**
+  - Allow users to link/unlink general SSO accounts from account settings.
   - If a user is linked to a general SSO provider,
     - Show a set password option in account settings if they have no password
     - Show the existing change password option otherwise.
@@ -199,12 +247,12 @@ We do not need to change the `EmailProviderMappings` configuration, as general p
   - Add the client ID and secret to the `STORJ_SSO_OIDC_PROVIDER_INFOS` configuration
 
 ## Open Questions
-* Should we allow users to unlink their SSO accounts and revert to email/password only?
 * Should we allow general SSO users to change their email?
 * Should we store state tokens in the db instead of cookies?
 * Should we require extra validation for linking a general SSO account to an existing user?
   * What happens if a user's SSO provider account is compromised? Account linking should be secure and reversible
-* Should link enterprise SSO accounts to users who have already authenticated with general SSO?
 
 ## Out of Scope
-This MVP focuses on Google SSO as the only general provider.
+This MVP focuses on Google SSO as the only general provider. Setting up other providers is trivial since the architecture
+is already in place. We only need to add the provider configuration to the `OidcProviderInfos` and update the UI accordingly
+to show the new provider options.
