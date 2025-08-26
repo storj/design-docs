@@ -73,9 +73,14 @@ A new nullable column will be added to the `projects` table:
 ALTER TABLE projects ADD COLUMN status_updated_at TIMESTAMP WITH TIME ZONE;
 ```
 This column will track whenever a project's status is updated, which is important for the deletion chore to know when to delete the project.
+Also, a composite index will be added on `(status, status_updated_at)` to optimize the chore's query.
+```sql
+ALTER TABLE projects ADD INDEX idx_status_updated_at (status, status_updated_at);
+```
 
 #### Project Deletion Chore
 A new chore `ProjectDeletionChore` will be implemented to handle the actual deletion of projects marked as pending deletion.
+This functionality can also be added to an existing chore that is concerned with deleting data for users marked for deletion.
 This chore will run periodically and perform the following steps:
 1. Query for projects with status `ProjectPendingDeletion` and `status_updated_at` older than a configured grace period,
     ordered by `status_updated_at` to process the oldest marked projects first. This query will also get projects whose deletion
@@ -97,6 +102,11 @@ type Config struct {
 }
 ```
 
+### Admin Functionality
+- Admin will be able to mark a project as `ProjectPendingDeletion` via the admin API and UI.
+- Admin will be able to take a project out of `ProjectPendingDeletion` status and revert it back to `ProjectActive` if needed.
+  - Provided that the grace period has not elapsed.
+
 ### Open questions
 
 - Should we provide an admin API to manually trigger cleanup of specific projects?
@@ -116,6 +126,7 @@ type Config struct {
 - Count and log the number of projects deleted after a chore run cycle.
 - Count and log the number of failed deletion attempts.
 - Log the project IDs and user IDs for all deletion operations.
+- Log the amount of data deleted for each project if possible.
 
 ### Test plan
 
@@ -135,8 +146,3 @@ is enabled AND the chore's enabled configuration (which is false by default) is 
 When the flow is disabled, the old flow will be used as before. In case there is an issue with the new flow, the
 configuration can be set to false, disable the new flow and the chore. Projects marked as pending deletion will remain
 in status `ProjectPendingDeletion` indefinitely until the chore is re-enabled or manually cleaned up.
-
-## Out of scope
-
-- Admin functionality to manually delete projects.
-- Admin functionality to restore projects marked as pending deletion.
