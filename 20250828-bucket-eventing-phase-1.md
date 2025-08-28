@@ -277,6 +277,10 @@ The bucket eventing service should report metrics on:
 
 ### Test plan
 
+TODO: Check is Spanner and Pub/Sub emulator provide enough support for local testing:
+- https://seroter.com/2024/03/04/no-cloud-account-no-problem-try-out-change-streams-in-cloud-spanner-locally-with-a-dozen-ish-shell-commands/
+- https://cloud.google.com/pubsub/docs/emulator
+
 ### Rollout
 
 ### Rollback
