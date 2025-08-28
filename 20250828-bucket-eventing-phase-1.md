@@ -297,3 +297,363 @@ The bucket eventing service should report metrics on:
   - `eTag`
 - Satellite UI, Admin UI, or S3 API (Get/PutBucketNotificationConfiguration) for configuring bucket eventing. It will be done via a support ticket.
 - Billing. We will observe the additional COGS associated with the introduction of bucket eventing, but we will not charge the customers yet.
+
+## Appendix
+
+### Reference AmazonS3 Event Notification Messages
+
+Test notification:
+
+```json
+{
+  "Service": "Amazon S3",
+  "Event": "s3:TestEvent",
+  "Time": "2025-08-19T12:06:41.134Z",
+  "Bucket": "kaloyanraev-eventing-versioning",
+  "RequestId": "Y44M7AEZ4094C205",
+  "HostId": "HImzvLC0BD9EOegbJtl0huUpUC0I+Rdtk+oWfVM/ML/D+s8zZQxux8Q8g4bqx+S0ilJICD8PQzM="
+}
+```
+
+Upload in an unversioned bucket:
+
+```json
+{
+  "Records": [
+    {
+      "eventVersion": "2.1",
+      "eventSource": "aws:s3",
+      "awsRegion": "us-east-1",
+      "eventTime": "2025-08-15T12:48:21.889Z",
+      "eventName": "ObjectCreated:Put",
+      "userIdentity": {
+        "principalId": "A17XYCDB5IK9TN"
+      },
+      "requestParameters": {
+        "sourceIPAddress": "212.5.158.124"
+      },
+      "responseElements": {
+        "x-amz-request-id": "7BP7XCW7MEFZSM1D",
+        "x-amz-id-2": "lcHSINuv1tq647rD5T+TIF5L4QPPdHNxT0DKM2sKrxBQ9YHgRwKnurQRkul+t9OrNQnFtUKaijBQHeQuvYp9uuUNEL9pO9C6ZxLVzpPCiNI="
+      },
+      "s3": {
+        "s3SchemaVersion": "1.0",
+        "configurationId": "ObjectEvents",
+        "bucket": {
+          "name": "kaloyanraev-eventing",
+          "ownerIdentity": {
+            "principalId": "A17XYCDB5IK9TN"
+          },
+          "arn": "arn:aws:s3:::kaloyanraev-eventing"
+        },
+        "object": {
+          "key": "storj-logo-mark-color.jpg",
+          "size": 64908,
+          "eTag": "648edf24a9148598217c55b41c42a84a",
+          "sequencer": "00689F2C95DA726DCD"
+        }
+      }
+    }
+  ]
+}
+```
+
+Delete in an unversioned bucket:
+
+```json
+{
+  "Records": [
+    {
+      "eventVersion": "2.1",
+      "eventSource": "aws:s3",
+      "awsRegion": "us-east-1",
+      "eventTime": "2025-08-15T12:56:46.680Z",
+      "eventName": "ObjectRemoved:Delete",
+      "userIdentity": {
+        "principalId": "A17XYCDB5IK9TN"
+      },
+      "requestParameters": {
+        "sourceIPAddress": "212.5.158.124"
+      },
+      "responseElements": {
+        "x-amz-request-id": "1TMRCAHG1NWF4J2X",
+        "x-amz-id-2": "gEBXKKm+hPJT04Motcn49Y9Kp0yyD9H0irXYlvqs3hNlCc74cR79dPiDgyXw0r2LzUPeyMTMeZwp99jiFG/+H5LhdJf9cSF91ItwbfA3QQ8="
+      },
+      "s3": {
+        "s3SchemaVersion": "1.0",
+        "configurationId": "ObjectEvents",
+        "bucket": {
+          "name": "kaloyanraev-eventing",
+          "ownerIdentity": {
+            "principalId": "A17XYCDB5IK9TN"
+          },
+          "arn": "arn:aws:s3:::kaloyanraev-eventing"
+        },
+        "object": {
+          "key": "storj-logo-mark-color.jpg",
+          "sequencer": "00689F2E8EA8DF4617"
+        }
+      }
+    }
+  ]
+}
+```
+
+Upload in a versioned bucket:
+
+```json
+{
+  "Records": [
+    {
+      "eventVersion": "2.1",
+      "eventSource": "aws:s3",
+      "awsRegion": "us-east-1",
+      "eventTime": "2025-08-19T12:10:38.000Z",
+      "eventName": "ObjectCreated:Put",
+      "userIdentity": {
+        "principalId": "A17XYCDB5IK9TN"
+      },
+      "requestParameters": {
+        "sourceIPAddress": "92.247.48.98"
+      },
+      "responseElements": {
+        "x-amz-request-id": "NJ59W66SNKVSPZNR",
+        "x-amz-id-2": "OglZYUaIJQXO68Z1qJmdl/rAkte4AkML/J/jzYPMXFHeLG836kuJhW9psVAKgQOd/VKdbJLYd2mMfWH1QA7n+OuzwPXEScKEXWZ55WIjvZ8="
+      },
+      "s3": {
+        "s3SchemaVersion": "1.0",
+        "configurationId": "ObjectEvents",
+        "bucket": {
+          "name": "kaloyanraev-eventing-versioning",
+          "ownerIdentity": {
+            "principalId": "A17XYCDB5IK9TN"
+          },
+          "arn": "arn:aws:s3:::kaloyanraev-eventing-versioning"
+        },
+        "object": {
+          "key": "storjv3.pdf",
+          "size": 749643,
+          "eTag": "ae88c74482d6b23aa5de21a129611762",
+          "versionId": "rJiPdgcFaEeV2N2Us6yYU8ObkyJeEL7j",
+          "sequencer": "0068A469BDE7041115"
+        }
+      }
+    }
+  ]
+}
+```
+
+Copy in a versioned bucket:
+
+```json
+{
+  "Records": [
+    {
+      "eventVersion": "2.1",
+      "eventSource": "aws:s3",
+      "awsRegion": "us-east-1",
+      "eventTime": "2025-08-19T12:17:49.045Z",
+      "eventName": "ObjectCreated:Copy",
+      "userIdentity": {
+        "principalId": "A17XYCDB5IK9TN"
+      },
+      "requestParameters": {
+        "sourceIPAddress": "92.247.48.98"
+      },
+      "responseElements": {
+        "x-amz-request-id": "4KKH5EYKKD5V4RXW",
+        "x-amz-id-2": "WgQyBbdoHj24gbXkvfoJYi3ulC+sluyUomMjtx7BIRpqhnLAEXlcF3R5884/1sJLdwIn+eBdSTu6nTU0A0+c2f/eCKH8CujY3n4Vr6Qrg9g="
+      },
+      "s3": {
+        "s3SchemaVersion": "1.0",
+        "configurationId": "ObjectEvents",
+        "bucket": {
+          "name": "kaloyanraev-eventing-versioning",
+          "ownerIdentity": {
+            "principalId": "A17XYCDB5IK9TN"
+          },
+          "arn": "arn:aws:s3:::kaloyanraev-eventing-versioning"
+        },
+        "object": {
+          "key": "copy/storjv3.pdf",
+          "size": 749643,
+          "eTag": "ae88c74482d6b23aa5de21a129611762",
+          "versionId": "ggUgyNgN95Fe9pTZ0a7e.O3dDSrOYimf",
+          "sequencer": "0068A46B6CE017B360"
+        }
+      }
+    }
+  ]
+}
+```
+
+Create a delete marker in a versioned bucket:
+
+```json
+{
+  "Records": [
+    {
+      "eventVersion": "2.1",
+      "eventSource": "aws:s3",
+      "awsRegion": "us-east-1",
+      "eventTime": "2025-08-19T12:23:05.261Z",
+      "eventName": "ObjectRemoved:DeleteMarkerCreated",
+      "userIdentity": {
+        "principalId": "A17XYCDB5IK9TN"
+      },
+      "requestParameters": {
+        "sourceIPAddress": "92.247.48.98"
+      },
+      "responseElements": {
+        "x-amz-request-id": "VJCDGSTEMAKVRTFG",
+        "x-amz-id-2": "hTQbT8ezm1I9ZCewX5MI9847slZo8l5kHqmXqvuWVxigtQa/RO1nq5pUyQBTBv4jlpEeN+0IgIN4WXeau4CICZmD1J4ZIhQRv7LnLS5ms2s="
+      },
+      "s3": {
+        "s3SchemaVersion": "1.0",
+        "configurationId": "ObjectEvents",
+        "bucket": {
+          "name": "kaloyanraev-eventing-versioning",
+          "ownerIdentity": {
+            "principalId": "A17XYCDB5IK9TN"
+          },
+          "arn": "arn:aws:s3:::kaloyanraev-eventing-versioning"
+        },
+        "object": {
+          "key": "storjv3.pdf",
+          "eTag": "d41d8cd98f00b204e9800998ecf8427e",
+          "versionId": "86iGIOikTC_a1B1ofO9rfAlEEb1ShcVy",
+          "sequencer": "0068A46CA93FF7352F"
+        }
+      }
+    }
+  ]
+}
+```
+
+Delete a delete marker in a versioned bucket:
+
+```json
+{
+  "Records": [
+    {
+      "eventVersion": "2.1",
+      "eventSource": "aws:s3",
+      "awsRegion": "us-east-1",
+      "eventTime": "2025-08-19T12:25:42.043Z",
+      "eventName": "ObjectRemoved:Delete",
+      "userIdentity": {
+        "principalId": "A17XYCDB5IK9TN"
+      },
+      "requestParameters": {
+        "sourceIPAddress": "92.247.48.98"
+      },
+      "responseElements": {
+        "x-amz-request-id": "0S31WTCRNQD1RB4C",
+        "x-amz-id-2": "+5fLXYmJJ/NXOUWLJK5K67BmKdz1iNE3KB/GuKrrFDGZhWcLgmr1GXVZaQA4+li2oFLe24IxuZwlY/zosJRJIU/kra9VLxAv"
+      },
+      "s3": {
+        "s3SchemaVersion": "1.0",
+        "configurationId": "ObjectEvents",
+        "bucket": {
+          "name": "kaloyanraev-eventing-versioning",
+          "ownerIdentity": {
+            "principalId": "A17XYCDB5IK9TN"
+          },
+          "arn": "arn:aws:s3:::kaloyanraev-eventing-versioning"
+        },
+        "object": {
+          "key": "storjv3.pdf",
+          "versionId": "86iGIOikTC_a1B1ofO9rfAlEEb1ShcVy",
+          "sequencer": "0068A46D4609AE53C0"
+        }
+      }
+    }
+  ]
+}
+```
+
+Delete an object version in a versioned bucket:
+
+```json
+{
+  "Records": [
+    {
+      "eventVersion": "2.1",
+      "eventSource": "aws:s3",
+      "awsRegion": "us-east-1",
+      "eventTime": "2025-08-19T12:27:39.942Z",
+      "eventName": "ObjectRemoved:Delete",
+      "userIdentity": {
+        "principalId": "A17XYCDB5IK9TN"
+      },
+      "requestParameters": {
+        "sourceIPAddress": "92.247.48.98"
+      },
+      "responseElements": {
+        "x-amz-request-id": "Q8CGT3CHB5TK1Q1B",
+        "x-amz-id-2": "ZlJvF6/xBvrPq0x9vC81OfRM8SnD6G8nx2X3wtpy9kFWBXSIUUXwB6XEIT7XUQtqW9gaLk51vtrmlYup/wvkOpYJAzptLMfa"
+      },
+      "s3": {
+        "s3SchemaVersion": "1.0",
+        "configurationId": "ObjectEvents",
+        "bucket": {
+          "name": "kaloyanraev-eventing-versioning",
+          "ownerIdentity": {
+            "principalId": "A17XYCDB5IK9TN"
+          },
+          "arn": "arn:aws:s3:::kaloyanraev-eventing-versioning"
+        },
+        "object": {
+          "key": "storjv3.pdf",
+          "versionId": "rJiPdgcFaEeV2N2Us6yYU8ObkyJeEL7j",
+          "sequencer": "0068A46DBBE66B75D0"
+        }
+      }
+    }
+  ]
+}
+```
+
+Multipart upload in a versioned bucket:
+
+```json
+{
+  "Records": [
+    {
+      "eventVersion": "2.1",
+      "eventSource": "aws:s3",
+      "awsRegion": "us-east-1",
+      "eventTime": "2025-08-21T06:01:36.249Z",
+      "eventName": "ObjectCreated:CompleteMultipartUpload",
+      "userIdentity": {
+        "principalId": "A17XYCDB5IK9TN"
+      },
+      "requestParameters": {
+        "sourceIPAddress": "92.247.48.98"
+      },
+      "responseElements": {
+        "x-amz-request-id": "GKT6YKTYN4K8B5GG",
+        "x-amz-id-2": "UgtJJqIQXvWeODWeweKdzn9JBduwsYgigUrFZWWkE1kjxb06rKH0Mivox9eWPBrOUP/iXyuodQXVABb5AhD84uG8NbBWiJPT4SFN1V19tiU="
+      },
+      "s3": {
+        "s3SchemaVersion": "1.0",
+        "configurationId": "ObjectEvents",
+        "bucket": {
+          "name": "kaloyanraev-eventing-versioning",
+          "ownerIdentity": {
+            "principalId": "A17XYCDB5IK9TN"
+          },
+          "arn": "arn:aws:s3:::kaloyanraev-eventing-versioning"
+        },
+        "object": {
+          "key": "bbb_sunflower_1080p_30fps_normal.mp4",
+          "size": 276134947,
+          "eTag": "e30d2648a6e1c6d43d00f84006340bc2-17",
+          "versionId": "RpZ29eNhA3jU1YCUADX6ijqUlZuJ54VB",
+          "sequencer": "0068A6B602CA35D4AF"
+        }
+      }
+    }
+  ]
+}
+```
