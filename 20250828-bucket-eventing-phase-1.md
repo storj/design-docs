@@ -234,6 +234,55 @@ The bucket eventing service will transform the [change record fields](https://cl
 
 ### Anti-goals
 
+### Alternatives considered
+
+- We considered the API pods to be the source of bucket events. We concluded that the Spanner change stream makes it easier to guarantee at-lease-once delivery.
+
+### Open question
+
+For Phase 1:
+- How are we going to distinguish between `ObjectCreated:Put`, `ObjectCreated:Post`, `ObjectCreated:CompleteMultipartUpload`, and `ObjectCreated:Copy` events from Spanner change records.
+- What permissions do we need to set to Spanner and Pub/Sub?
+
+For future phases:
+- How do we provide these info to the notifications:
+  - `awsRegion`
+  - `userIndentity`
+  - `sourceIPAddress`
+  - `x-amz-request-id`
+  - `x-amz-id-2`
+  - `eTag`
+    - Can the `eTag` be decrypted with the satellite-managed passphrase?
+
+
+## Reminders
+
+### Security / Privacy
+
+#### Private Project ID
+
+The private project ID is a secret. We have to ensure that we don’t leak any private project ID in the event notification messages or in logs, and always convert it to the public project ID.
+
+#### GCP Permissions
+
+TODO: describe the permissions we need to apply to Spanner and require the customer to apply to their Pub/Sub topic.
+
+### Observability
+
+The bucket eventing service should report metrics on:
+- Number of unexpected change records, indicating that we are not excluding all unnecessary transactions from the change stream.
+- Delta between the current time and the timestamp of the change records. Long delays would indicate a performance issue.
+- Stats for pushed event messages per bucket. This will help us understand the eventing usage per customer.
+  - The stats should include min, max, avg size of the message, which will help us determine the cost if we own the Pub/Sub topics in the future.
+
+### Test plan
+
+### Rollout
+
+### Rollback
+
+## Out of scope
+
 - Multiple destinations per bucket
 - Filtering rules
 - Event types other than `s3:ObjectCreated:Put`, `s3:ObjectRemoved:Delete`, and `s3:ObjectRemoved:DeleteMarkerCreated`
@@ -248,21 +297,3 @@ The bucket eventing service will transform the [change record fields](https://cl
   - `eTag`
 - Satellite UI, Admin UI, or S3 API (Get/PutBucketNotificationConfiguration) for configuring bucket eventing. It will be done via a support ticket.
 - Billing. We will observe the additional COGS associated with the introduction of bucket eventing, but we will not charge the customers yet.
-
-### Alternatives considered
-
-### Open question
-
-## Reminders
-
-### Security / Privacy
-
-### Observability
-
-### Test plan
-
-### Rollout
-
-### Rollback
-
-## Out of scope
