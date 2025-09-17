@@ -277,13 +277,17 @@ The bucket eventing service should report metrics on:
 
 ### Test plan
 
-TODO: Check is Spanner and Pub/Sub emulator provide enough support for local testing:
-- https://seroter.com/2024/03/04/no-cloud-account-no-problem-try-out-change-streams-in-cloud-spanner-locally-with-a-dozen-ish-shell-commands/
-- https://cloud.google.com/pubsub/docs/emulator
+There are local Spanner and Pub/Sub emulators that provide basic local testing. Wherever they fall short in functionality, we can use test instances in Google cloud for the integration testing.
 
-### Rollout
-
-### Rollback
+Non-exhaustive test plan that emphasizes on a few key points:
+- Check that no change records are read from the change stream if no bucket is enabled for eventing.
+- Check that an change stream reader logs an error if the event notification cannot be delivered to the pub/sub topic.
+- Check that change record is properly transformed to event notifications and delivered to the pub/sub topic.
+  - Check that the object version ID is only included for buckets with versioning enabled.
+- Check that no logs include the private project ID. Wherever a project ID is included, it must be the public project ID.
+- Configure an HTTP push notificaton to the pub/sub topic and check that the events are delivered to the configured HTTP endpoint.
+- Configure multiple buckets for eventing and check that the notification are properly delviered to the respective pub/sub topic.
+- Make multiple uploads and deletes in a few seconds, and check that all event notification are delivered to the pub/sub topic within 2 seconds.
 
 ## Out of scope
 
