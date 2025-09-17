@@ -84,7 +84,7 @@ Strategies for reducing the COGS:
 
 ##### Creating the Spanner Change Stream
 
-We will [[create a change stream](https://cloud.google.com/spanner/docs/change-streams/manage) on the `objects` table with the following DDL:
+We will [create a change stream](https://cloud.google.com/spanner/docs/change-streams/manage) on the `objects` table with the following DDL:
 
 ```sql
 CREATE CHANGE STREAM bucket_eventing
@@ -208,13 +208,13 @@ The bucket eventing service will transform the [change record fields](https://cl
 
 - `eventVersion`: will be hardcoded to `2.1`
 - `eventSource`: will be hardcoded to `storj:s3`
-- `awsRegion`: TODO
-  - What does Storj equivalent to the AWS region? Is it the placement? If it is, we don’t have it available in the objects table, but only in the segments table. Is it the satellite? We can skip it for Phase 1 to avoid confusion.
+- `awsRegion`: will be skipped for Phase 1
+  - What does Storj equivalent to the AWS region? Is it the placement? If it is, we don’t have it available in the objects table, but only in the segments table. Is it the satellite?
 - `eventTime`: will be set to the `commit_timestamp` from the change record
 - `eventName`: will be set to one of the supported S3 event type following these rules:
   - `ObjectCreated:Put` if the change record’s `mod_type` is `INSERT`, and the `status` new value is either `CommittedUnversioned(3)` or `CommittedVersioned(4)`. This event type will be also set in those case where it is supposed to have `s3:ObjectCreated:Post`, `s3:ObjectCreated:Copy`, and `s3:ObjectCreated:CompleteMultipartUpload` instead as we currently we don’t have an easy way to distinguish between these event type from the change record.
-  - `ObjectCreated:DeleteMarkerCreated` if the change record’s `mod_type` is `INSERT`, and the `status` new value is either `DeleteMarkerVersioned(5)` or `DeleteMarkerUnversioned(6)`.
-  - `ObjectCreated:Delete` if the change record’s `mod_type` is `DELETE`, and the `status` old value is either `CommittedUnversioned(3)`, `CommittedVersioned(4)`, `DeleteMarkerVersioned(5)`, or `DeleteMarkerUnversioned(6)`.
+  - `ObjectRemoved:DeleteMarkerCreated` if the change record’s `mod_type` is `INSERT`, and the `status` new value is either `DeleteMarkerVersioned(5)` or `DeleteMarkerUnversioned(6)`.
+  - `ObjectRemoved:Delete` if the change record’s `mod_type` is `DELETE`, and the `status` old value is either `CommittedUnversioned(3)`, `CommittedVersioned(4)`, `DeleteMarkerVersioned(5)`, or `DeleteMarkerUnversioned(6)`.
 - `userIdentity`: will be skipped as the `objects` table does not keep information who initiated the database transaction
 - `requestParameters`: will be skipped as the `objects` table does not keep information for the source IP of the client who initiated the database transaction
 - `requestParameters`: will be skipped as the `objects` table does not keep information for the client request ID and the host that processed the request
@@ -228,7 +228,7 @@ The bucket eventing service will transform the [change record fields](https://cl
 - `object->size`: will be set to the new `total_plain_size` value of the change record
 - `object->eTag`: will be skipped for Phase 1
 - `object->versionId`: will be set to the `version` key of the change record and skipped if the bucket is not versioning-enabled.
-- `object->sequencer`:  will be set to the `commit_timestamp` UNIX nanoseconds from the change record, converted to a 16-character, zero-padded, uppercase hex string. TODO: do we need to append a hex of the record_sequence? My current guess is: No.
+- `object->sequencer`:  will be set to the `commit_timestamp` UNIX nanoseconds from the change record, converted to a 16-character, zero-padded, uppercase hex string.
 
 ## Disclaimers
 
