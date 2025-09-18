@@ -263,9 +263,31 @@ For future phases:
 
 The private project ID is a secret. We have to ensure that we don’t leak any private project ID in the event notification messages or in logs, and always convert it to the public project ID.
 
-#### GCP Permissions
+#### Google Cloud Platform Permissions
 
-TODO: describe the permissions we need to apply to Spanner and require the customer to apply to their Pub/Sub topic.
+##### Service Account
+
+We must create a new service account for each GCP project where we operate a satellite. The service account should have a descriptive and stable ID, so we can include it in the user documentation. The customer will have to grant permission to this service account to push message to their Pub/Sub topic.
+
+Suggested service account ID: `bucket-eventing`
+
+Service account email address: `bucket-eventing@<project-id>.iam.gserviceaccount.com`
+
+##### Compute Engine VM Instance
+
+The Spanner Change Stream Reader should be deployed to a Google Compute Engine VM instance in the same GCP project of the satellite and the same region of the Spanner instance.
+
+The service account for this VM instance must be set to the `bucket-eventing` service account discussed above.
+
+The `Cloud Platform` access scope must be enabled for this VM instance so it can call the Spanner API (to read the change stream) and the Pub/Sub API (to publish messages).
+
+##### Spanner Instance
+
+We must assign the `Cloud Spanner Database Reader` role to the `bucket_eventing` service account in satellite Spanner instance. This allows the Spanner Change Stream Reader to read the Spanner change stream.
+
+##### Pub/Sub Topic
+
+The customer must assign the `Pub/Sub Publisher` role to the Storj `bucket_eventing` service account in their Pub/Sub topic. This allows the Spanner Change Stream Reader to publish messages to their Pub/Sub topic.
 
 ### Observability
 
@@ -281,13 +303,13 @@ There are local Spanner and Pub/Sub emulators that provide basic local testing. 
 
 Non-exhaustive test plan that emphasizes on a few key points:
 - Check that no change records are read from the change stream if no bucket is enabled for eventing.
-- Check that an change stream reader logs an error if the event notification cannot be delivered to the pub/sub topic.
-- Check that change record is properly transformed to event notifications and delivered to the pub/sub topic.
+- Check that an change stream reader logs an error if the event notification cannot be delivered to the Pub/Sub topic.
+- Check that change record is properly transformed to event notifications and delivered to the Pub/Sub topic.
   - Check that the object version ID is only included for buckets with versioning enabled.
 - Check that no logs include the private project ID. Wherever a project ID is included, it must be the public project ID.
-- Configure an HTTP push notificaton to the pub/sub topic and check that the events are delivered to the configured HTTP endpoint.
-- Configure multiple buckets for eventing and check that the notification are properly delviered to the respective pub/sub topic.
-- Make multiple uploads and deletes in a few seconds, and check that all event notification are delivered to the pub/sub topic within 2 seconds.
+- Configure an HTTP push notificaton to the Pub/Sub topic and check that the events are delivered to the configured HTTP endpoint.
+- Configure multiple buckets for eventing and check that the notification are properly delviered to the respective Pub/Sub topic.
+- Make multiple uploads and deletes in a few seconds, and check that all event notification are delivered to the Pub/Sub topic within 2 seconds.
 
 ## Out of scope
 
