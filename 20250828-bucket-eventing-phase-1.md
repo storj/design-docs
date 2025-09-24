@@ -93,19 +93,17 @@ FOR objects (
    total_plain_size
 ) OPTIONS (
    exclude_ttl_deletes = TRUE,
-   exclude_update = TRUE,
    allow_txn_exclusion = TRUE
 );
 ```
 
 The change stream will watch the following table columns:
 - The `project_id`, `bucket_name`, `object_key`, and `version` columns are the primary key and implicitly included in the change records, so we must not specify them. Otherwise, the DDL execution will fail.
-- The `status` column to determine if an `INSERT` change record corresponds to a committed object (`status = 3` or `4`) or a delete marker (`status = 5` or `6`).
+- The `status` column to determine if an `INSERT` or `UPDATE` change record corresponds to a committed object (`status = 3` or `4`) or a delete marker (`status = 5` or `6`).
 - The `total_plain_size` column to populate the `size` field of the `s3:ObjectCreated:*` notifications.
 
 We set the following option to reduce the number of change records in the change stream:
 - The `exclude_ttl_deletes = TRUE` option, because TTL deletes correspond to `s3:LifecycleExpiration:*` events, which are out of scope for Phase 1.
-- The `exclude_update = TRUE` option, because we are not interested in them. An object is committed to the table with a `DELETE`+`INSERT` transaction instead of with an `UPDATE`.
 - The `allow_txn_exclusion = TRUE` option to exclude all transactions with the option `exclude_txn_from_change_streams = TRUE` (i.e. all transactions related to buckets that are not enabled for eventing).
 
 As Spanner change streams are created by executing a DDL like above, we can simply add the DDL as a new step to the satellite DB migration.
@@ -212,7 +210,7 @@ The bucket eventing service will transform the [change record fields](https://cl
   - What does Storj equivalent to the AWS region? Is it the placement? If it is, we don’t have it available in the objects table, but only in the segments table. Is it the satellite?
 - `eventTime`: will be set to the `commit_timestamp` from the change record
 - `eventName`: will be set to one of the supported S3 event types following these rules:
-  - `ObjectCreated:Put` if the change record’s `mod_type` is `INSERT`, and the `status` new value is either `CommittedUnversioned(3)` or `CommittedVersioned(4)`. This event type will also be set in those cases where it is supposed to have `s3:ObjectCreated:Post`, `s3:ObjectCreated:Copy`, and `s3:ObjectCreated:CompleteMultipartUpload` instead, as we currently don’t have an easy way to distinguish between these event types from the change record.
+  - `ObjectCreated:Put` if the change record’s `mod_type` is `INSERT` or `UPDATE`, and the `status` new value is either `CommittedUnversioned(3)` or `CommittedVersioned(4)`. For `UPDATE` records, the `status` old value should be `Pending(1)`. This event type will also be set in those cases where it is supposed to have `s3:ObjectCreated:Post`, `s3:ObjectCreated:Copy`, and `s3:ObjectCreated:CompleteMultipartUpload` instead, as we currently don’t have an easy way to distinguish between these event types from the change record.
   - `ObjectRemoved:DeleteMarkerCreated` if the change record’s `mod_type` is `INSERT`, and the `status` new value is either `DeleteMarkerVersioned(5)` or `DeleteMarkerUnversioned(6)`.
   - `ObjectRemoved:Delete` if the change record’s `mod_type` is `DELETE`, and the `status` old value is either `CommittedUnversioned(3)`, `CommittedVersioned(4)`, `DeleteMarkerVersioned(5)`, or `DeleteMarkerUnversioned(6)`.
 - `userIdentity`: will be skipped as the `objects` table does not keep information on who initiated the database transaction
