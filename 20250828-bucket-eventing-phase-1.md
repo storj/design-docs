@@ -39,7 +39,7 @@ Deliver an S3-compatible bucket event notifications MVP to a select group of ini
 - `s3:ObjectCreated:Put`, `s3:ObjectRemoved:Delete`, and `s3:ObjectRemoved:DeleteMarkerCreated` as the only supported types. All these event types are enabled for the bucket.
 - Minimal bucket eventing configuration: the customer opens a support ticket, which is processed by the engineering team
 - Notification message body compliant with version 2.1 of the [S3 event message structure](https://docs.aws.amazon.com/AmazonS3/latest/userguide/notification-content-structure.html)
-- User documentation how to configure [Pub/Sub Push subscription](https://cloud.google.com/pubsub/docs/push) to an HTTPS webhook
+- User documentation on how to configure [Pub/Sub Push subscription](https://cloud.google.com/pubsub/docs/push) to an HTTPS webhook
 
 ### Approach / Design
 
@@ -52,16 +52,16 @@ Assumptions for implementation:
 
 Spanner cost:
 - Storage of change records. Every time a data change occurs (insert, update, or delete) that is being watched by a change stream, Spanner writes a data change record to its internal storage. This write happens within the same transaction as the data change itself, ensuring consistency. The charge for the storage consumed by these records is at the same rate as the standard Spanner database storage. The amount of storage used depends on the volume of changes and the data retention period configured for the change stream. The retention period can be from 1 to 30 days.
-- No egress free if the change stream reader is in the same region. Otherwise, the standard egress fee applies.
+- No egress fee if the change stream reader is in the same region. Otherwise, the standard egress fee applies.
 
 Compute Engine cost:
-- The compute cost for reading the change stream and pushing notification to the destination Pub/Sub topic is proportional to the number of change records written to the change stream.
-- No egress free if the destination Pub/Sub topic is global or configured to the same region.
+- The compute cost for reading the change stream and pushing a notification to the destination Pub/Sub topic is proportional to the number of change records written to the change stream.
+- No egress fee if the destination Pub/Sub topic is global or configured to the same region.
 
 Pub/Sub cost:
 - Throughput (message volume). The total volume of data published to the topic is charged at $40/TiB. The size of a message is calculated as the sum of its payload and its attributes, with a minimum billable size of 1 KB per message.
 - Message storage. Any message retained beyond the default 24 hours is charged at $0.27 per GiB-month.
-- Egress fee. The same throughput fee of $40/TiB applies for the message volume delivered by a pull or push subscription. Although the fee is the same, it is applied independently from the fee for publishing to the topic (i.e. the data entering the topic). So the total throughput fee for the volume entering and exiting the topic (if not filtering or transformation is applied) is $80/TiB.
+- Egress fee. The same throughput fee of $40/TiB applies to the message volume delivered by a pull or push subscription. Although the fee is the same, it is applied independently of the fee for publishing to the topic (i.e. the data entering the topic). So the total throughput fee for the volume entering and exiting the topic (if not filtering or transformation is applied) is $80/TiB.
 
 Strategies for reducing the COGS:
 - Reduce the number of change records written to the Spanner change stream.
@@ -72,8 +72,8 @@ Strategies for reducing the COGS:
 - Require the customer to own the Pub/Sub topic in their GCP account.
   - This transfers the throughput cost of $80/TiB to the customer, which is the primary cost for the bucket eventing.
   - This also transfers the responsibility for any inefficiencies in the customer’s webhook to the customer themselves.
-  - This is inline with AmazonS3. They don’t push notifications directly to webhooks, but require the use of some other AWS services like SNS, SQS, or Lambda and the customer bears the cost for using them.
-  - As a bonus for the customer, they can take advantage of the 10 GiB free tier for throughput. They can also take actions of optimizing their cost through topic/subscription configuration.
+  - This is in line with AmazonS3. They don’t push notifications directly to webhooks, but require the use of some other AWS services like SNS, SQS, or Lambda, and the customer bears the cost for using them.
+  - As a bonus for the customer, they can take advantage of the 10 GiB free tier for throughput. They can also take actions to optimize their cost through topic/subscription configuration.
 - Require the customer Pub/Sub topic to be global or configured to the same region as the Storj satellite.
   - This eliminates the egress fee from the Change Stream Reader to the Pub/Sub topic.
 - Minimize the retention period for the Spanner change stream (is the minimum of 1 day enough?).
@@ -106,9 +106,9 @@ The change stream will watch the following table columns:
 We set the following option to reduce the number of change records in the change stream:
 - The `exclude_ttl_deletes = TRUE` option, because TTL deletes correspond to `s3:LifecycleExpiration:*` events, which are out of scope for Phase 1.
 - The `exclude_update = TRUE` option, because we are not interested in them. An object is committed to the table with a `DELETE`+`INSERT` transaction instead of with an `UPDATE`.
-- The `allow_txn_exclusion = TRUE` option to exclude all transactions with option `exclude_txn_from_change_streams = TRUE` (i.e. all transactions related to buckets that are not enabled for eventing).
+- The `allow_txn_exclusion = TRUE` option to exclude all transactions with the option `exclude_txn_from_change_streams = TRUE` (i.e. all transactions related to buckets that are not enabled for eventing).
 
-As Spanner change streams are created with executing a DDL like above, we can simply add the DDL as a new step to the satellite DB migration.
+As Spanner change streams are created by executing a DDL like above, we can simply add the DDL as a new step to the satellite DB migration.
 
 Later, if we decide to change the list of watched columns or any of the options, we can [modify the change stream](https://cloud.google.com/spanner/docs/change-streams/manage#modify) with another migration step.
 
@@ -145,7 +145,7 @@ The Kafka connector is not suitable as we do not have an existing Kafka cluster.
 
 Dataflow is the simplest option, but its Spanner change stream reading functionality is only supported in Java. To avoid introducing another programming language, we will not use Dataflow.
 
-Therefore, we will utilize the [Spanner API](https://cloud.google.com/spanner/docs/change-streams/details#query). A key consideration with this approach is the need to manage change stream partition lifecycles, a feature that Dataflow provides out-of-the-box. We can leverage a [community-maintained library](https://pkg.go.dev/github.com/cloudspannerecosystem/spanner-change-streams-tail/changestreams) to assist with this.
+Therefore, we will utilize the [Spanner API](https://cloud.google.com/spanner/docs/change-streams/details#query). A key consideration with this approach is the need to manage change stream partition lifecycles, a feature that Dataflow provides out of the box. We can leverage a [community-maintained library](https://pkg.go.dev/github.com/cloudspannerecosystem/spanner-change-streams-tail/changestreams) to assist with this.
 
 The logic responsible for reading the change stream and publishing messages to Pub/Sub must operate within Google Cloud, specifically in the same region as the satellite’s Spanner instance. Implementing this as a new Metainfo service is the most appropriate solution.
 
@@ -211,11 +211,11 @@ The bucket eventing service will transform the [change record fields](https://cl
 - `awsRegion`: will be skipped for Phase 1
   - What does Storj equivalent to the AWS region? Is it the placement? If it is, we don’t have it available in the objects table, but only in the segments table. Is it the satellite?
 - `eventTime`: will be set to the `commit_timestamp` from the change record
-- `eventName`: will be set to one of the supported S3 event type following these rules:
-  - `ObjectCreated:Put` if the change record’s `mod_type` is `INSERT`, and the `status` new value is either `CommittedUnversioned(3)` or `CommittedVersioned(4)`. This event type will be also set in those case where it is supposed to have `s3:ObjectCreated:Post`, `s3:ObjectCreated:Copy`, and `s3:ObjectCreated:CompleteMultipartUpload` instead as we currently we don’t have an easy way to distinguish between these event type from the change record.
+- `eventName`: will be set to one of the supported S3 event types following these rules:
+  - `ObjectCreated:Put` if the change record’s `mod_type` is `INSERT`, and the `status` new value is either `CommittedUnversioned(3)` or `CommittedVersioned(4)`. This event type will also be set in those cases where it is supposed to have `s3:ObjectCreated:Post`, `s3:ObjectCreated:Copy`, and `s3:ObjectCreated:CompleteMultipartUpload` instead, as we currently don’t have an easy way to distinguish between these event types from the change record.
   - `ObjectRemoved:DeleteMarkerCreated` if the change record’s `mod_type` is `INSERT`, and the `status` new value is either `DeleteMarkerVersioned(5)` or `DeleteMarkerUnversioned(6)`.
   - `ObjectRemoved:Delete` if the change record’s `mod_type` is `DELETE`, and the `status` old value is either `CommittedUnversioned(3)`, `CommittedVersioned(4)`, `DeleteMarkerVersioned(5)`, or `DeleteMarkerUnversioned(6)`.
-- `userIdentity`: will be skipped as the `objects` table does not keep information who initiated the database transaction
+- `userIdentity`: will be skipped as the `objects` table does not keep information on who initiated the database transaction
 - `requestParameters`: will be skipped as the `objects` table does not keep information for the source IP of the client who initiated the database transaction
 - `requestParameters`: will be skipped as the `objects` table does not keep information for the client request ID and the host that processed the request
 - `s3SchemaVersion`: will be hardcoded to `1.0`
@@ -224,7 +224,7 @@ The bucket eventing service will transform the [change record fields](https://cl
 - `bucket->name`: will be set to the `bucket_name` key of the change record
 - `bucket->ownerIdentity->principalId`: will be set to the public project ID of the bucket. The bucket eventing chore will resolve the public project ID from the `project_id` key (the private project ID) of the change record.
 - `bucket->arn`: will be set to `arn:storj:s3:::<bucket_name>`
-- `object->key`: will be set to the `object_key` key of the change record. There will be no attempt to decrypt the object key. If the object key is encrypted it will be the user's responsibility to decrypt it. We will provide the tooling and documentation.
+- `object->key`: will be set to the `object_key` key of the change record. There will be no attempt to decrypt the object key. If the object key is encrypted, it will be the user's responsibility to decrypt it. We will provide the tooling and documentation.
 - `object->size`: will be set to the new `total_plain_size` value of the change record
 - `object->eTag`: will be skipped for Phase 1
 - `object->versionId`: will be set to the `version` key of the change record and skipped if the bucket is not versioning-enabled.
@@ -236,16 +236,16 @@ The bucket eventing service will transform the [change record fields](https://cl
 
 ### Alternatives considered
 
-- We considered the API pods to be the source of bucket events. We concluded that the Spanner change stream makes it easier to guarantee at-lease-once delivery.
+- We considered the API pods to be the source of bucket events. We concluded that the Spanner change stream makes it easier to guarantee at-least-once delivery.
 
 ### Open question
 
 For Phase 1:
-- How are we going to distinguish between `ObjectCreated:Put`, `ObjectCreated:Post`, `ObjectCreated:CompleteMultipartUpload`, and `ObjectCreated:Copy` events from Spanner change records.
-- What permissions do we need to set to Spanner and Pub/Sub?
+- How are we going to distinguish between `ObjectCreated:Put`, `ObjectCreated:Post`, `ObjectCreated:CompleteMultipartUpload`, and `ObjectCreated:Copy` events from Spanner change records?
+- What permissions do we need to set for Spanner and Pub/Sub?
 
 For future phases:
-- How do we provide these info to the notifications:
+- How do we provide this info to the notifications:
   - `awsRegion`
   - `userIndentity`
   - `sourceIPAddress`
@@ -267,7 +267,7 @@ The private project ID is a secret. We have to ensure that we don’t leak any p
 
 ##### Service Account
 
-We must create a new service account for each GCP project where we operate a satellite. The service account should have a descriptive and stable ID, so we can include it in the user documentation. The customer will have to grant permission to this service account to push message to their Pub/Sub topic.
+We must create a new service account for each GCP project where we operate a satellite. The service account should have a descriptive and stable ID, so we can include it in the user documentation. The customer will have to grant permission to this service account to push messages to their Pub/Sub topic.
 
 Suggested service account ID: `bucket-eventing`
 
@@ -275,7 +275,7 @@ Service account email address: `bucket-eventing@<project-id>.iam.gserviceaccount
 
 ##### Compute Engine VM Instance
 
-The Spanner Change Stream Reader should be deployed to a Google Compute Engine VM instance in the same GCP project of the satellite and the same region of the Spanner instance.
+The Spanner Change Stream Reader should be deployed to a Google Compute Engine VM instance in the same GCP project as the satellite and the same region of the Spanner instance.
 
 The service account for this VM instance must be set to the `bucket-eventing` service account discussed above.
 
@@ -283,7 +283,7 @@ The `Cloud Platform` access scope must be enabled for this VM instance so it can
 
 ##### Spanner Instance
 
-We must assign the `Cloud Spanner Database Reader` role to the `bucket_eventing` service account in satellite Spanner instance. This allows the Spanner Change Stream Reader to read the Spanner change stream.
+We must assign the `Cloud Spanner Database Reader` role to the `bucket_eventing` service account in the satellite Spanner instance. This allows the Spanner Change Stream Reader to read the Spanner change stream.
 
 ##### Pub/Sub Topic
 
@@ -299,27 +299,27 @@ The bucket eventing service should report metrics on:
 
 ### Test plan
 
-There are local Spanner and Pub/Sub emulators that provide basic local testing. Wherever they fall short in functionality, we can use test instances in Google cloud for the integration testing.
+There are local Spanner and Pub/Sub emulators that provide basic local testing. Wherever they fall short in functionality, we can use test instances in Google Cloud for the integration testing.
 
-Non-exhaustive test plan that emphasizes on a few key points:
+Non-exhaustive test plan that emphasizes a few key points:
 - Check that no change records are read from the change stream if no bucket is enabled for eventing.
-- Check that an change stream reader logs an error if the event notification cannot be delivered to the Pub/Sub topic.
-- Check that change record is properly transformed to event notifications and delivered to the Pub/Sub topic.
+- Check that the change stream reader logs an error if the event notification cannot be delivered to the Pub/Sub topic.
+- Check that the change record is properly transformed to event notifications and delivered to the Pub/Sub topic.
   - Check that the object version ID is only included for buckets with versioning enabled.
 - Check that no logs include the private project ID. Wherever a project ID is included, it must be the public project ID.
-- Configure an HTTP push notificaton to the Pub/Sub topic and check that the events are delivered to the configured HTTP endpoint.
-- Configure multiple buckets for eventing and check that the notification are properly delviered to the respective Pub/Sub topic.
-- Make multiple uploads and deletes in a few seconds, and check that all event notification are delivered to the Pub/Sub topic within 2 seconds.
+- Configure an HTTP push notification to the Pub/Sub topic and check that the events are delivered to the configured HTTP endpoint.
+- Configure multiple buckets for eventing and check that the notifications are properly delivered to the respective Pub/Sub topic.
+- Make multiple uploads and deletes in a few seconds, and check that all event notifications are delivered to the Pub/Sub topic within 2 seconds.
 
 ## Out of scope
 
 - Multiple destinations per bucket
 - Filtering rules
 - Event types other than `s3:ObjectCreated:Put`, `s3:ObjectRemoved:Delete`, and `s3:ObjectRemoved:DeleteMarkerCreated`
-  - `s3:ObjectCreated:Post`, `s3:ObjectCreated:Copy`, and `s3:ObjectCreated:CompleteMultipartUpload` are out of scope too as we don’t have an easy way to distinguish them from `s3:ObjectCreated:Put`
+  - `s3:ObjectCreated:Post`, `s3:ObjectCreated:Copy`, and `s3:ObjectCreated:CompleteMultipartUpload` are out of scope too, as we don’t have an easy way to distinguish them from `s3:ObjectCreated:Put`
 - Fine-grain configuration of event types, e.g. only `s3:ObjectCreated:*` or only `s3:ObjectRemoved:Delete` event types. All `s3:ObjectCreated:*` and `s3:ObjectRemoved:*` events are always available for a bucket with enabled eventing.
 - Event batching. Event notification will contain only one bucket event.
-- Some fields from event message structure that are not trivial to provide:
+- Some fields from the event message structure that are not trivial to provide:
   - `awsRegion`
   - `userIdentity`
   - `requestParameters`
@@ -345,7 +345,7 @@ Test notification:
 }
 ```
 
-Upload in an unversioned bucket:
+Upload to an unversioned bucket:
 
 ```json
 {
@@ -429,7 +429,7 @@ Delete in an unversioned bucket:
 }
 ```
 
-Upload in a versioned bucket:
+Upload to a versioned bucket:
 
 ```json
 {
