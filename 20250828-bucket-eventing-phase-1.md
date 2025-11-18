@@ -9,6 +9,8 @@ tags: [ "satellite", "satellite/metainfo", "bucket eventing" ]
 
 Date: 2025-08-28
 
+Last update: 2025-11-14
+
 Owner: [Kaloyan Raev](https://github.com/kaloyan-raev)
 
 Accountable:
@@ -36,7 +38,7 @@ Deliver an S3-compatible bucket event notifications MVP to a select group of ini
 - Google Pub/Sub as the only supported destination type
   - We will ask the customer to provide a Pub/Sub topic in their own GCP account
   - [Pub/Sub Lite](https://cloud.google.com/pubsub/docs/choosing-pubsub-or-lite) is deprecated and we won’t support it
-- `s3:ObjectCreated:Put`, `s3:ObjectRemoved:Delete`, and `s3:ObjectRemoved:DeleteMarkerCreated` as the only supported types. All these event types are enabled for the bucket.
+- `s3:ObjectCreated:Put`, `s3:ObjectCreated:Copy`, `s3:ObjectRemoved:Delete`, and `s3:ObjectRemoved:DeleteMarkerCreated` as the only supported types. All these event types are enabled for the bucket.
 - Minimal bucket eventing configuration: the customer opens a support ticket, which is processed by the engineering team
 - Notification message body compliant with version 2.1 of the [S3 event message structure](https://docs.aws.amazon.com/AmazonS3/latest/userguide/notification-content-structure.html)
 - User documentation on how to configure [Pub/Sub Push subscription](https://cloud.google.com/pubsub/docs/push) to an HTTPS webhook
@@ -89,9 +91,11 @@ We will [create a change stream](https://cloud.google.com/spanner/docs/change-st
 ```sql
 CREATE CHANGE STREAM bucket_eventing
 FOR objects (
+   stream_id,
    status,
    total_plain_size
 ) OPTIONS (
+   value_capture_type = 'NEW_ROW_AND_OLD_VALUES',
    exclude_ttl_deletes = TRUE,
    allow_txn_exclusion = TRUE
 );
@@ -99,12 +103,14 @@ FOR objects (
 
 The change stream will watch the following table columns:
 - The `project_id`, `bucket_name`, `object_key`, and `version` columns are the primary key and implicitly included in the change records, so we must not specify them. Otherwise, the DDL execution will fail.
-- The `status` column to determine if an `INSERT` or `UPDATE` change record corresponds to a committed object (`status = 3` or `4`) or a delete marker (`status = 5` or `6`).
+- The `stream_id` column to generate the S3-compatible `versionId` field in event notifications. The version ID is a composite of the object's `version` and `stream_id`, hex-encoded as a `StreamVersionID`.
+- The `status` column to capture database transactions that must generate an S3 event, but modify only this column.
 - The `total_plain_size` column to populate the `size` field of the `s3:ObjectCreated:*` notifications.
 
-We set the following option to reduce the number of change records in the change stream:
-- The `exclude_ttl_deletes = TRUE` option, because TTL deletes correspond to `s3:LifecycleExpiration:*` events, which are out of scope for Phase 1.
-- The `allow_txn_exclusion = TRUE` option to exclude all transactions with the option `exclude_txn_from_change_streams = TRUE` (i.e. all transactions related to buckets that are not enabled for eventing).
+We set the following options:
+- `value_capture_type = 'NEW_ROW_AND_OLD_VALUES'` to capture both old and new values. This is necessary for always having the `stream_id` value at hand as some UPDATE transactions would not modify it.
+- `exclude_ttl_deletes = TRUE` because TTL deletes correspond to `s3:LifecycleExpiration:*` events, which are out of scope for Phase 1.
+- `allow_txn_exclusion = TRUE` to enable per-transaction control over whether changes are included in the change stream (see next section).
 
 As Spanner change streams are created by executing a DDL like above, we can simply add the DDL as a new step to the satellite DB migration.
 
@@ -114,26 +120,37 @@ We will have only one change stream per Spanner instance to handle bucket events
 
 ##### Enabling Eventing for a Bucket
 
-For Phase 1 of bucket eventing, we anticipate limited customer usage. To enable this feature with minimal implementation effort, a configuration value like `bucket-eventing.buckets` will be used.
+For Phase 1 of bucket eventing, we anticipate limited customer usage. To enable this feature with minimal implementation effort, a configuration value `bucket-eventing.buckets` is used.
 
-The `bucket-eventing.buckets` config will accept a comma-separated list of `project_id:bucket_name:topic_id` tuples. Each project can have multiple buckets, but each bucket is restricted to a single topic.
+The configuration accepts a comma-separated list of `project_id:bucket_name:topic_name` tuples, where `topic_name` is a fully-qualified Pub/Sub topic name in the format `projects/PROJECT_ID/topics/TOPIC_ID`. Each project can have multiple buckets, but each bucket is restricted to a single topic.
 
 An example configuration value is: `4d0452d9-395d-498d-927f-a54a6544764e:my-bucket:projects/storj-developer-team/topics/bucket-eventing`.
 
-Upon startup, the metainfo service will read this configuration and store the configurations in a `map[metabase.BucketLocation]string` variable.
+Upon startup, the eventing service reads this configuration and stores it in a `map[metabase.BucketLocation]string` variable. Pub/Sub publishers are lazily initialized when the first event for a bucket is received.
 
 ##### Excluding Transactions From the Change Stream
 
-To optimize Spanner costs, it is crucial to [exclude](https://cloud.google.com/spanner/docs/change-streams#transaction-exclusion) all transactions from the change stream except those directly related to bucket eventing.
+To optimize Spanner costs, we [exclude](https://cloud.google.com/spanner/docs/change-streams#transaction-exclusion) transactions from the change stream except those directly related to bucket eventing.
 
-Before creating the change stream, ensure that the `exclude_txn_from_change_streams` transaction option is applied to all write transactions on the objects table. This option should not be set for read-only transactions, as it will result in an invalid argument error.
+The change stream is created with `allow_txn_exclusion = TRUE`, which enables per-transaction control. By default, all transactions are excluded from the change stream by setting `ExcludeTxnFromChangeStreams: true` in the transaction options.
 
-The `exclude_txn_from_change_streams` option should only be set to false if a transaction generates an event for a bucket with enabled eventing:
+The `ExcludeTxnFromChangeStreams` option is set to `false` (i.e., include in change stream) only when:
+- The transaction involves a bucket with eventing enabled (checked via configuration)
+- The operation is meant to generate an event (controlled by the `TransmitEvent` option in metabase operation parameters)
+
+Relevant metabase operations that support the `TransmitEvent` option:
 - `CommitInlineObject`
 - `CommitObjectWithSegments`
 - `FinishCopyObject`
+- `FinishMoveObject`
 - `DeleteObjectLastCommitted`
 - `DeleteObjectExactVersion`
+- `DeleteBucket`
+- `DeleteObjectsAllVersions`
+
+When these operations are called with `TransmitEvent: true`, the transaction is included in the change stream.
+
+**Note:** The Spanner emulator does not support `allow_txn_exclusion`, so this optimization is disabled in local testing environments.
 
 ##### Reading From the Change Stream
 
@@ -143,9 +160,67 @@ The Kafka connector is not suitable as we do not have an existing Kafka cluster.
 
 Dataflow is the simplest option, but its Spanner change stream reading functionality is only supported in Java. To avoid introducing another programming language, we will not use Dataflow.
 
-Therefore, we will utilize the [Spanner API](https://cloud.google.com/spanner/docs/change-streams/details#query). A key consideration with this approach is the need to manage change stream partition lifecycles, a feature that Dataflow provides out of the box. We can leverage a [community-maintained library](https://pkg.go.dev/github.com/cloudspannerecosystem/spanner-change-streams-tail/changestreams) to assist with this.
+Therefore, we utilize the [Spanner API](https://cloud.google.com/spanner/docs/change-streams/details#query). A key consideration with this approach is the need to manage change stream partition lifecycles, a feature that Dataflow provides out of the box. The `satellite/metabase/changestream` package implements a custom partition management system.
 
-The logic responsible for reading the change stream and publishing messages to Pub/Sub must operate within Google Cloud, specifically in the same region as the satellite’s Spanner instance. Implementing this as a new Metainfo service is the most appropriate solution.
+Key components:
+- **Processor**: Main loop (`changestream.Processor()`) that manages the partition lifecycle
+- **Partition Metadata Table**: `bucket_eventing_metadata` table tracks partition states (Created, Scheduled, Running, Finished)
+- **State Machine**: Partitions progress through states, with child partitions scheduled once all parent partitions finish
+- **Parallel Processing**: Multiple partitions are processed concurrently using goroutines
+- **Watermark Tracking**: Each partition's progress is tracked via watermark timestamps, enabling resumption after restarts
+
+The implementation automatically handles:
+- Initial partition bootstrapping
+- Child partition detection and scheduling
+- Heartbeat processing
+- Graceful resumption from last processed watermark
+
+##### Partition Metadata Tracking
+
+The implementation includes a `bucket_eventing_metadata` table to track partition processing state:
+
+```sql
+CREATE TABLE bucket_eventing_metadata (
+    partition_token STRING(MAX) NOT NULL,
+    parent_tokens   ARRAY<STRING(MAX)>,
+    start_timestamp TIMESTAMP NOT NULL,
+    state           INT64     NOT NULL DEFAULT (0),
+    watermark       TIMESTAMP NOT NULL,
+    created_at      TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP()),
+    scheduled_at    TIMESTAMP OPTIONS (allow_commit_timestamp = TRUE),
+    running_at      TIMESTAMP OPTIONS (allow_commit_timestamp = TRUE),
+    finished_at     TIMESTAMP OPTIONS (allow_commit_timestamp = TRUE),
+) PRIMARY KEY (partition_token),
+  ROW DELETION POLICY (OLDER_THAN(finished_at, INTERVAL 7 DAY));
+
+CREATE INDEX bucket_eventing_metadata_state ON bucket_eventing_metadata(state);
+```
+
+Partition states:
+- **Created (0)**: Child partition detected but waiting for parent partitions to finish
+- **Scheduled (1)**: Partition is ready to be processed, all parent partitions are finished
+- **Running (2)**: Partition is actively being processed
+- **Finished (3)**: Partition processing is complete
+
+This table enables:
+- Resuming from the last processed watermark after service restarts, fulfilling the at-least-once guarantee.
+- Parallel partition processing
+- Automatic cleanup of old partition metadata after 7 days
+
+The index on the `state` column is essential for efficient partition scheduling queries. The processor frequently queries for partitions in specific states (e.g., finding all `Scheduled` partitions to start processing, or checking if all parent partitions are `Finished`). Without this index, these queries would require full table scans, which would become expensive as the number of partitions grows.
+
+##### Bucket Eventing Service
+
+The logic responsible for reading the change stream and publishing S3-compatible event messages to Pub/Sub operates as a dedicated satellite service (`satellite/eventing`).
+
+Key features:
+- **Message Transformation**: Converts the data change records from the change stream to S3-compatible event notifications
+- **Lazy Publisher Initialization**: Pub/Sub publishers are created on-demand when the first event for a bucket is received
+- **Replaces Private Project ID**: Replaces the sensitive private project ID with the public project ID; uses `CachedPublicProjectIDs` wrapper to avoid repeated database lookups for project ID conversion
+- **Metrics and Observability**: Tracks publish success/failure, message size, and processing latency using eventkit
+- **Error Handling**: Failed publishes are logged but do not stop the change stream processing; the change stream continues to avoid disrupting the eventing service for other buckets
+
+The service is integrated into the satellite as a separate modular component that can be run independently or alongside other satellite services.
 
 ##### Pushing to the Pub/Sub Topic
 
@@ -155,7 +230,7 @@ In Phase 1, customers will be responsible for creating and managing their Pub/Su
 
 While it is technically feasible for Storj to create and maintain Pub/Sub topics in our own GCP account, this would require us to monitor usage for billing purposes. Since billing is not part of Phase 1, we will explore Storj-managed Pub/Sub topics in a later phase.
 
-The bucket eventing service will read change records from the Spanner change stream. For each record, it will verify if the project ID and bucket name match a Pub/Sub topic in the configuration. If a match is found, the service will transform the change record (as detailed in the subsequent section) and publish it as a message to the corresponding Pub/Sub topic. Should there be no matching Pub/Sub topic, the service will log the change record as a warning and discard it. It is not anticipated to encounter change records without a matching Pub/Sub topic, as such records should have been filtered out by the Metainfo service.
+The bucket eventing service reads change records from the Spanner change stream. For each record, it verifies if the project ID and bucket name match a Pub/Sub topic in the configuration. If a match is found, the service transforms the change record (as detailed in the subsequent section) and publishes it as a message to the corresponding Pub/Sub topic. Should there be no matching Pub/Sub topic, the service logs the change record as a warning and discards it. It is not anticipated to encounter change records without a matching Pub/Sub topic, as such records should have been filtered out by the transaction exclusion mechanism.
 
 ##### Transforming Change Records to Pub/Sub Messages
 The S3 bucket event notifications follow the version 2.1 [event message structure](https://docs.aws.amazon.com/AmazonS3/latest/userguide/notification-content-structure.html).
@@ -202,31 +277,43 @@ The S3 bucket event notifications follow the version 2.1 [event message structur
 }
 ```
 
-The bucket eventing service will transform the [change record fields](https://cloud.google.com/spanner/docs/change-streams/details#data-change-records) to the message values like this:
+The bucket eventing service transforms the [change record fields](https://cloud.google.com/spanner/docs/change-streams/details#data-change-records) to the message values like this:
 
-- `eventVersion`: will be hardcoded to `2.1`
-- `eventSource`: will be hardcoded to `storj:s3`
-- `awsRegion`: will be skipped for Phase 1
+- `eventVersion`: hardcoded to `2.1`
+- `eventSource`: hardcoded to `storj:s3`
+- `awsRegion`: skipped for Phase 1
   - What does Storj equivalent to the AWS region? Is it the placement? If it is, we don’t have it available in the objects table, but only in the segments table. Is it the satellite?
-- `eventTime`: will be set to the `commit_timestamp` from the change record
-- `eventName`: will be set to one of the supported S3 event types following these rules:
-  - `ObjectCreated:Put` if the change record’s `mod_type` is `INSERT` or `UPDATE`, and the `status` new value is either `CommittedUnversioned(3)` or `CommittedVersioned(4)`. For `UPDATE` records, the `status` old value should be `Pending(1)`. This event type will also be set in those cases where it is supposed to have `s3:ObjectCreated:Post`, `s3:ObjectCreated:Copy`, and `s3:ObjectCreated:CompleteMultipartUpload` instead, as we currently don’t have an easy way to distinguish between these event types from the change record.
-  - `ObjectRemoved:DeleteMarkerCreated` if the change record’s `mod_type` is `INSERT`, and the `status` new value is either `DeleteMarkerVersioned(5)` or `DeleteMarkerUnversioned(6)`.
-  - `ObjectRemoved:Delete` if the change record’s `mod_type` is `DELETE`, and the `status` old value is either `CommittedUnversioned(3)`, `CommittedVersioned(4)`, `DeleteMarkerVersioned(5)`, or `DeleteMarkerUnversioned(6)`.
-- `userIdentity`: will be skipped as the `objects` table does not keep information on who initiated the database transaction
-- `requestParameters`: will be skipped as the `objects` table does not keep information for the source IP of the client who initiated the database transaction
-- `requestParameters`: will be skipped as the `objects` table does not keep information for the client request ID and the host that processed the request
-- `s3SchemaVersion`: will be hardcoded to `1.0`
-- `configurationId`: will be hardcoded to `ObjectEvents`
+- `eventTime`: set to the `commit_timestamp` from the change record
+- `eventName`: determined using the `transaction_tag` field from the change record combined with the `mod_type`:
+  - `ObjectCreated:Put` for:
+    - `commit-inline-object` with `INSERT`
+    - `commit-object` with `INSERT` or `UPDATE`
+  - `ObjectCreated:Copy` for:
+    - `finish-copy-object` with `UPDATE`
+    - `finish-move-object` with `INSERT`
+  - `ObjectRemoved:DeleteMarkerCreated` for:
+    - `delete-object-last-committed-suspended` with `INSERT`
+    - `delete-object-last-committed-versioned` with `INSERT`
+  - `ObjectRemoved:Delete` for:
+    - `delete-all-bucket-objects` with `DELETE`
+    - `delete-object-exact-version` with `DELETE`
+    - `delete-object-exact-version-using-object-lock` with `DELETE`
+    - `delete-object-last-committed-plain` with `DELETE`
+  Using transaction tags provides accurate event type determination and distinguishes between Put, Post, CompleteMultipartUpload (all mapped to `ObjectCreated:Put`), and Copy operations (mapped to `ObjectCreated:Copy`).
+- `userIdentity`: skipped as the `objects` table does not keep information on who initiated the database transaction
+- `requestParameters`: skipped as the `objects` table does not keep information for the source IP of the client who initiated the database transaction
+- `requestParameters`: skipped as the `objects` table does not keep information for the client request ID and the host that processed the request
+- `s3SchemaVersion`: hardcoded to `1.0`
+- `configurationId`: hardcoded to `ObjectEvents`
   - In a future phase, it will be set to the `ID` from the `PutBucketNotificationConfiguration` request that enabled the bucket eventing
-- `bucket->name`: will be set to the `bucket_name` key of the change record
-- `bucket->ownerIdentity->principalId`: will be set to the public project ID of the bucket. The bucket eventing chore will resolve the public project ID from the `project_id` key (the private project ID) of the change record.
-- `bucket->arn`: will be set to `arn:storj:s3:::<bucket_name>`
-- `object->key`: will be set to the `object_key` key of the change record. There will be no attempt to decrypt the object key. If the object key is encrypted, it will be the user's responsibility to decrypt it. We will provide the tooling and documentation.
-- `object->size`: will be set to the new `total_plain_size` value of the change record
-- `object->eTag`: will be skipped for Phase 1
-- `object->versionId`: will be set to the `version` key of the change record and skipped if the bucket is not versioning-enabled.
-- `object->sequencer`:  will be set to the `commit_timestamp` UNIX nanoseconds from the change record, converted to a 16-character, zero-padded, uppercase hex string.
+- `bucket->name`: set to the `bucket_name` key of the change record
+- `bucket->ownerIdentity->principalId`: set to the public project ID of the bucket. The bucket eventing service resolves the public project ID from the `project_id` key (the private project ID) of the change record.
+- `bucket->arn`: set to `arn:storj:s3:::<bucket_name>`
+- `object->key`: set to the `object_key` key of the change record. There is no attempt to decrypt the object key. If the object key is encrypted, it is the user's responsibility to decrypt it. We will provide the tooling and documentation.
+- `object->size`: set to the new `total_plain_size` value of the change record
+- `object->eTag`: skipped for Phase 1
+- `object->versionId`: set to a hex-encoded `StreamVersionID`, which is a composite of the object's `version` and `stream_id` from the change record. This field is only included for versioned buckets.
+- `object->sequencer`:  set to the `commit_timestamp` UNIX nanoseconds from the change record, converted to a 16-character, zero-padded, uppercase hex string.
 
 ## Disclaimers
 
@@ -238,10 +325,6 @@ The bucket eventing service will transform the [change record fields](https://cl
 
 ### Open question
 
-For Phase 1:
-- How are we going to distinguish between `ObjectCreated:Put`, `ObjectCreated:Post`, `ObjectCreated:CompleteMultipartUpload`, and `ObjectCreated:Copy` events from Spanner change records?
-- What permissions do we need to set for Spanner and Pub/Sub?
-
 For future phases:
 - How do we provide this info to the notifications:
   - `awsRegion`
@@ -251,7 +334,6 @@ For future phases:
   - `x-amz-id-2`
   - `eTag`
     - Can the `eTag` be decrypted with the satellite-managed passphrase?
-
 
 ## Reminders
 
@@ -281,7 +363,7 @@ The `Cloud Platform` access scope must be enabled for this VM instance so it can
 
 ##### Spanner Instance
 
-We must assign the `Cloud Spanner Database Reader` role to the `bucket_eventing` service account in the satellite Spanner instance. This allows the Spanner Change Stream Reader to read the Spanner change stream.
+We must assign the `Cloud Spanner Database User` role to the `bucket_eventing` service account in the satellite Spanner instance. This allows the Spanner Change Stream Reader to read the Spanner change stream and persist its state in the metadata table.
 
 ##### Pub/Sub Topic
 
@@ -294,6 +376,7 @@ The bucket eventing service should report metrics on:
 - Delta between the current time and the timestamp of the change records. Long delays would indicate a performance issue.
 - Stats for pushed event messages per bucket. This will help us understand the eventing usage per customer.
   - The stats should include min, max, avg size of the message, which will help us determine the cost if we own the Pub/Sub topics in the future.
+- Lagging watermark for running partitions. This would indicate that some partitions are not processed.
 
 ### Test plan
 
@@ -308,13 +391,14 @@ Non-exhaustive test plan that emphasizes a few key points:
 - Configure an HTTP push notification to the Pub/Sub topic and check that the events are delivered to the configured HTTP endpoint.
 - Configure multiple buckets for eventing and check that the notifications are properly delivered to the respective Pub/Sub topic.
 - Make multiple uploads and deletes in a few seconds, and check that all event notifications are delivered to the Pub/Sub topic within 2 seconds.
+- Stop the Spanner Change Stream Reader, make uploads and deletes, run the Spanner Change Stream Reader again and check the events are delievered without loss.
 
 ## Out of scope
 
 - Multiple destinations per bucket
 - Filtering rules
-- Event types other than `s3:ObjectCreated:Put`, `s3:ObjectRemoved:Delete`, and `s3:ObjectRemoved:DeleteMarkerCreated`
-  - `s3:ObjectCreated:Post`, `s3:ObjectCreated:Copy`, and `s3:ObjectCreated:CompleteMultipartUpload` are out of scope too, as we don’t have an easy way to distinguish them from `s3:ObjectCreated:Put`
+- Event types other than `s3:ObjectCreated:Put`, `s3:ObjectCreated:Copy`, `s3:ObjectRemoved:Delete`, and `s3:ObjectRemoved:DeleteMarkerCreated`
+  - `s3:ObjectCreated:Post` and `s3:ObjectCreated:CompleteMultipartUpload` are out of scope too, as we don’t have an easy way to distinguish them from `s3:ObjectCreated:Put`
 - Fine-grain configuration of event types, e.g. only `s3:ObjectCreated:*` or only `s3:ObjectRemoved:Delete` event types. All `s3:ObjectCreated:*` and `s3:ObjectRemoved:*` events are always available for a bucket with enabled eventing.
 - Event batching. Event notification will contain only one bucket event.
 - Some fields from the event message structure that are not trivial to provide:
