@@ -7,7 +7,7 @@ tags: [ "satellite", "satellite/metainfo", "bucket eventing", "s3 api" ]
 
 ### Header
 
-Date: 2025-01-17
+Date: 2025-11-17
 
 Owner: [Kaloyan Raev](https://github.com/kaloyan-raev)
 
