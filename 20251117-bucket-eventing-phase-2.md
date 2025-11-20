@@ -102,6 +102,7 @@ Create a new table specifically for notification configurations.
 - Clear separation of concerns
 - Consistent across all database backends
 - Future-proof for adding more complex configurations
+- Leverages Spanner default value functions (GENERATE_UUID, CURRENT_TIMESTAMP) for automatic field generation
 
 **Cons:**
 - Additional table to manage
@@ -112,16 +113,24 @@ Create a new table specifically for notification configurations.
 CREATE TABLE bucket_eventing_configs (
     project_id       BYTES(MAX) NOT NULL,
     bucket_name      BYTES(MAX) NOT NULL,
-    config_id        STRING(MAX) NOT NULL,
+    config_id        STRING(MAX) NOT NULL DEFAULT (GENERATE_UUID()),
     topic_name       STRING(MAX) NOT NULL,
     events           ARRAY<STRING(128)> NOT NULL,
     filter_prefix    BYTES(1024),
     filter_suffix    BYTES(1024),
     created_at       TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP()),
     updated_at       TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP()),
-    PRIMARY KEY (project_id, bucket_name)
-);
+    CONSTRAINT bucket_eventing_configs_bucket_fkey
+        FOREIGN KEY (project_id, bucket_name)
+        REFERENCES bucket_metainfos (project_id, name)
+        ON DELETE CASCADE
+) PRIMARY KEY (project_id, bucket_name);
 ```
+
+**Notes:**
+- `config_id`: User can optionally provide an ID in the API request (any string value). If not provided, Spanner auto-generates a UUID using `GENERATE_UUID()`.
+- `PRIMARY KEY (project_id, bucket_name)`: Ensures only one notification configuration per bucket (Phase 2 limitation).
+- **Foreign Key with CASCADE DELETE**: When a bucket is deleted from `bucket_metainfos`, the notification configuration is automatically deleted from `bucket_eventing_configs`. This prevents a new bucket with the same name from inadvertently inheriting the old bucket's notification configuration. Follows the same pattern used throughout the codebase (e.g., `api_keys`, `project_members`, `project_invitations`).
 
 **Decision:** We will use **Approach B** (dedicated table) for the implementation. This provides better queryability, consistency across database backends, and future-proofing for more complex configurations.
 
@@ -186,6 +195,9 @@ message FilterRule {
 - Both prefix and suffix empty/omitted means no filtering (all objects match)
 
 **Implementation:**
+
+Following S3 behavior, this operation **replaces the entire notification configuration** for the bucket. Each call overwrites any existing configuration.
+
 1. Verify project is enabled for bucket eventing via `bucket-eventing.projects` config
 2. Verify project has satellite-managed encryption (path encryption disabled)
 3. Check macaroon permissions: `macaroon.ActionPutBucketNotificationConfiguration`
@@ -199,7 +211,7 @@ message FilterRule {
    - Publish S3 `s3:TestEvent` notification (see format in Appendix)
    - Wait synchronously for publish success (timeout: 10 seconds)
    - If test event fails to publish, return error code `rpcstatus.FailedPrecondition` with the underlying Pub/Sub error message
-6. Store configuration in database (insert or update)
+6. Store configuration in database using UPSERT (`INSERT OR UPDATE`) - replaces any existing configuration for this bucket
 7. Return success
 
 **Empty Configuration Handling:**
