@@ -161,6 +161,9 @@ If this check fails, return:
 - Error code: `rpcstatus.FailedPrecondition`
 - Message: `"Bucket eventing requires satellite-managed encryption (path encryption must be disabled)"`
 
+**Note on Encrypted Path Support:**
+While the underlying architecture can handle both encrypted and unencrypted object paths, this phase focuses exclusively on supporting unencrypted paths (satellite-managed encryption). This is expected to be the preferred configuration for customers who require bucket eventing capabilities. Support for encrypted paths could be added in a future phase if customer demand warrants the additional complexity.
+
 #### Metainfo API Endpoints
 
 We will add new gRPC methods to the metainfo service for managing bucket notification configurations.
