@@ -15,7 +15,11 @@ Accountable:
 - [Michał Niewrzał](https://github.com/mniewrzal)
 
 Consulted:
-- TODO
+- [Maximillian von Briesen](https://github.com/mobyvb)
+- [Jennifer Li Johnson](https://github.com/jenlij)
+- [Márton Elek](https://github.com/elek)
+- [Michael Ferris](https://github.com/ferristocrat)
+- [Ivan Fraixedes](https://github.com/ifraixedes)
 
 Informed:
 - [#eng-object-storage-eventing](https://storj.slack.com/archives/C0939NQNFFG)
@@ -107,6 +111,7 @@ Create a new table specifically for notification configurations.
 **Cons:**
 - Additional table to manage
 - More database migrations
+- Additional database query overhead during metainfo operations (CommitObject, DeleteObject, etc.) to fetch notification configuration for TransmitEvent evaluation. Mitigated by Redis caching strategy.
 
 **Schema:**
 ```sql
@@ -260,6 +265,24 @@ These actions will be checked in the metainfo endpoints before processing the re
 
 API keys must have the appropriate permissions to call these endpoints. This follows the S3 model where `s3:PutBucketNotification` and `s3:GetBucketNotification` are separate permissions.
 
+#### Libuplink Integration
+
+The libuplink library (https://github.com/storj/uplink) needs to expose the new metainfo gRPC methods. These will be used primarily by the S3 gateway to implement the S3 notification configuration API.
+
+**New Methods to Add:**
+
+```go
+// In private package (not public API)
+func (project *Project) SetBucketNotificationConfiguration(ctx context.Context, bucket string, config *NotificationConfiguration) error
+func (project *Project) GetBucketNotificationConfiguration(ctx context.Context, bucket string) (*NotificationConfiguration, error)
+```
+
+**Private Package Placement:**
+
+These methods will be added to the **private package** in libuplink because:
+- They are primarily intended for S3 gateway use (not general public API)
+- Users access bucket eventing through the S3 API (AWS CLI, SDK, etc.), not directly via libuplink
+
 #### S3 Gateway Integration
 
 The S3 gateway uses a fork of Minio (https://github.com/storj/minio) where we add custom methods to the ObjectLayer interface. Following the pattern used for Object Lock (see commit [97cae2c](https://github.com/storj/minio/commit/97cae2c0d7f119ad4e04d73c181b406b7f03d36d)), we need to add similar methods for bucket notifications.
@@ -361,6 +384,22 @@ Due to independent caching in metainfo and eventing services, configuration chan
 - A change stream record may be created (TransmitEvent=true with old config) but filtered out by eventing service (with new config)
 - This is expected behavior during the cache TTL window (up to 5 minutes) and results in no event being published
 - The warning log "no configuration exists" may appear during this transition period
+
+**Error Handling - Infrastructure Failures:**
+When both Redis and database fail while retrieving notification configuration:
+1. Log error with change stream record details (project_id, bucket_name)
+2. Retry with exponential backoff: 1s, 2s, 4s, 8s (max wait 8s)
+3. Increment `bucket_eventing_config_lookup_errors` metric (alerts on-call)
+4. **Do NOT advance change stream position** until configuration is successfully retrieved
+
+This approach:
+- ✅ Preserves at-least-once delivery guarantee
+- ✅ Prevents silent event loss during infrastructure outages
+- ✅ Blocks change stream partition (appropriate for infrastructure failure)
+- ✅ Triggers alerting for immediate remediation
+- ❌ Partition processing stalls during Redis+DB outage (acceptable trade-off)
+
+**Rationale:** Infrastructure failures (Redis and database both unavailable) require immediate operational response. Silently dropping events would break delivery guarantees. Blocking the partition ensures no data loss and forces resolution of the underlying infrastructure issue.
 
 #### Test Event Format
 
@@ -504,7 +543,7 @@ This invalidates the cache **across all pods immediately** since Redis is shared
 
 **Trade-offs:**
 - **Additional network call**: Redis lookup adds latency compared to local LRU cache (but still much faster than Spanner)
-- **Redis dependency**: Requires Redis to be operational (but already critical for live accounting)
+- **Performance degradation when Redis unavailable**: Falls back to direct database queries when Redis is unavailable, increasing latency and Spanner load
 - **TTL window**: Configuration changes may take up to 5 minutes to propagate if cache invalidation fails (rare edge case)
 
 #### Configuration Consistency
