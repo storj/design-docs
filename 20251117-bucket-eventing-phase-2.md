@@ -124,7 +124,7 @@ CREATE TABLE bucket_eventing_configs (
     filter_prefix    BYTES(1024),
     filter_suffix    BYTES(1024),
     created_at       TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP()),
-    updated_at       TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP()),
+    updated_at       TIMESTAMP NOT NULL OPTIONS (allow_commit_timestamp = TRUE),
     CONSTRAINT bucket_eventing_configs_bucket_fkey
         FOREIGN KEY (project_id, bucket_name)
         REFERENCES bucket_metainfos (project_id, name)
@@ -269,12 +269,12 @@ API keys must have the appropriate permissions to call these endpoints. This fol
 
 The libuplink library (https://github.com/storj/uplink) needs to expose the new metainfo gRPC methods. These will be used primarily by the S3 gateway to implement the S3 notification configuration API.
 
-**New Methods to Add:**
+**New Functions to Add:**
 
 ```go
-// In private package (not public API)
-func (project *Project) SetBucketNotificationConfiguration(ctx context.Context, bucket string, config *NotificationConfiguration) error
-func (project *Project) GetBucketNotificationConfiguration(ctx context.Context, bucket string) (*NotificationConfiguration, error)
+// In private/bucket package (not public API)
+func SetBucketNotificationConfiguration(ctx context.Context, project *uplink.Project, bucketName string, config *metaclient.BucketNotificationConfiguration) error
+func GetBucketNotificationConfiguration(ctx context.Context, project *uplink.Project, bucketName string) (*metaclient.BucketNotificationConfiguration, error)
 ```
 
 **Private Package Placement:**
@@ -286,6 +286,14 @@ These methods will be added to the **private package** in libuplink because:
 #### S3 Gateway Integration
 
 The S3 gateway uses a fork of Minio (https://github.com/storj/minio) where we add custom methods to the ObjectLayer interface. Following the pattern used for Object Lock (see commit [97cae2c](https://github.com/storj/minio/commit/97cae2c0d7f119ad4e04d73c181b406b7f03d36d)), we need to add similar methods for bucket notifications.
+
+**Minio Fork Changes:**
+
+The Storj Minio fork (`pkg/event/arn.go`) uses a GCP-specific ARN format for Pub/Sub topics:
+- Format: `arn:gcp:pubsub::PROJECT_ID:TOPIC_ID`
+- Example: `arn:gcp:pubsub::my-gcp-project:my-bucket-events`
+
+This ARN format is used in the S3 XML API for `<Topic>` elements. The gateway-ST converts between this ARN format and the fully-qualified Pub/Sub topic name (`projects/PROJECT_ID/topics/TOPIC_ID`) used internally by the satellite.
 
 **ObjectLayer Interface Methods to Add:**
 
@@ -307,10 +315,11 @@ In the Storj gateway-ST (https://github.com/storj/gateway-st), implement these O
 For `SetBucketNotificationConfig`:
 1. Receive `*event.Config` from Minio framework (already parsed from S3 XML)
 2. Validate the config contains only Pub/Sub topic destinations (reject SNS, SQS, Lambda)
-3. Convert Minio `*event.Config` to metainfo `NotificationConfiguration` protobuf
-4. Call `metainfo.SetBucketNotificationConfiguration` gRPC method
-5. Wait for synchronous response (including test event validation)
-6. Return error or nil
+3. Validate at most one topic destination (reject multiple topics)
+4. Convert Minio `*event.Config` to metainfo `NotificationConfiguration` protobuf
+5. Call `metainfo.SetBucketNotificationConfiguration` gRPC method
+6. Wait for synchronous response (including test event validation)
+7. Return error or nil
 
 For `GetBucketNotificationConfig`:
 1. Call `metainfo.GetBucketNotificationConfiguration` gRPC method
@@ -356,8 +365,8 @@ Requires `s3:ObjectCreated:Put`:
 - `CommitObjectWithSegments`
 
 Requires `s3:ObjectCreated:Copy`:
-- `FinishCopyObject`
-- `FinishMoveObject`
+- `FinishCopyObject` - checks only the destination bucket
+- `FinishMoveObject` - checks both source and destination buckets (OR logic), since a move affects two locations
 
 Requires `s3:ObjectRemoved:Delete`:
 - `DeleteObjectsAllVersions`
@@ -386,11 +395,11 @@ Due to independent caching in metainfo and eventing services, configuration chan
 - The warning log "no configuration exists" may appear during this transition period
 
 **Error Handling - Infrastructure Failures:**
-When both Redis and database fail while retrieving notification configuration:
+When processing a change record fails (config lookup, publisher creation, or event publishing):
 1. Log error with change stream record details (project_id, bucket_name)
 2. Retry with exponential backoff: 1s, 2s, 4s, 8s (max wait 8s)
-3. Increment `bucket_eventing_config_lookup_errors` metric (alerts on-call)
-4. **Do NOT advance change stream position** until configuration is successfully retrieved
+3. After exhausting the backoff schedule, emit `bucket_eventing_publish_critical` eventkit event (alerts on-call) and continue retrying at max backoff interval
+4. **Do NOT advance change stream position** until the record is successfully processed
 
 This approach:
 - ✅ Preserves at-least-once delivery guarantee
@@ -410,8 +419,7 @@ When `PutBucketNotificationConfiguration` validates the destination, it sends a 
   "Service": "Storj S3",
   "Event": "s3:TestEvent",
   "Time": "2025-01-17T10:30:00.000Z",
-  "Bucket": "my-bucket",
-  "RequestId": "550e8400-e29b-41d4-a716-446655440000"
+  "Bucket": "my-bucket"
 }
 ```
 
@@ -420,6 +428,7 @@ When `PutBucketNotificationConfiguration` validates the destination, it sends a 
 - Uses a temporary Pub/Sub publisher (not cached)
 - Timeout: 10 seconds
 - If publish fails (network error, auth error, topic doesn't exist), return error to user
+- In production, `metainfo.bucket-eventing-service-account` must be configured with the `bucket-eventing` service account email that customers grant access to their Pub/Sub topics (see Phase 1 "Service Account" section). The test event publisher uses GCP service account impersonation to publish to the topic.
 
 #### Filtering Rules
 
@@ -698,7 +707,7 @@ Example request body for S3 `PUT /?notification`:
 <NotificationConfiguration>
     <TopicConfiguration>
         <Id>MyNotificationConfig</Id>
-        <Topic>projects/my-gcp-project/topics/my-bucket-events</Topic>
+        <Topic>arn:gcp:pubsub::my-gcp-project:my-bucket-events</Topic>
         <Event>s3:ObjectCreated:*</Event>
         <Event>s3:ObjectRemoved:Delete</Event>
         <Filter>
@@ -729,8 +738,7 @@ Empty configuration (to delete):
   "Service": "Storj S3",
   "Event": "s3:TestEvent",
   "Time": "2025-01-17T10:30:00.000Z",
-  "Bucket": "my-bucket",
-  "RequestId": "550e8400-e29b-41d4-a716-446655440000"
+  "Bucket": "my-bucket"
 }
 ```
 
