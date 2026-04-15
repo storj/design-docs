@@ -65,34 +65,7 @@ tracking it in the Satellite database. Commits:
 * https://review.dev.storj.tools/c/storj/storj/+/20498
 * https://review.dev.storj.tools/c/storj/storj/+/20499
 
-#### Business details
-
-Storj current pricing tiers are:
-* Regional: $10/TB. 1x egress per month included, additional egress $0.01/GB
-* Archive: $6/TB. Egress $0.02/GB
-* Global: $15/TB. 1x egress per month included, additional egress $0.02/GB
-
-Minimum usage is $5/month, unless it's prepaid with STROJ tokens or via a partner.
-
-All our tiers have a 30 days trial period limited to 25 GB.
-
-### Goals
-
-Customers see all their usage spread through several satellites unified in a same web interface and
-their only get one charge for the entire usage per billing cycle.
-
-Customers can see the usage of each specific satellite and they receive the usage per satellite in
-the invoice details.
-
-### Approach / Design
-
-#### Globally tracking usage
-
-Each satellite has its own separated database, at this time, they use a different Spanner instance
-or database. These database aren't interconnected.
-
-Some initial work has been done to use [Eventkit](https://pkg.go.dev/storj.io/Eventkit) to store all
-the usage data into our BigQuery data warehouse.
+##### Evenkit considerations
 
 Eventkit was conceived for telemetry, specifically to report multidimensional events. Initially was
 sending data over UDP, but because it has an abstraction how the data is sent to destinations, it
@@ -158,9 +131,48 @@ to context deadline exceeded.
 Batch destination is more important, in the last 24 at the time of writing this sentence the [US1 had
 dropped 30250 events](https://thanos.storj.rodeo/d/ivwnsll/satellite-Eventkit?orgId=1&from=now-24h&to=now&timezone=UTC).
 
+#### Business details
+
+Storj current pricing tiers are:
+* Regional: $10/TB. 1x egress per month included, additional egress $0.01/GB
+* Archive: $6/TB. Egress $0.02/GB
+* Global: $15/TB. 1x egress per month included, additional egress $0.02/GB
+
+Minimum usage is $5/month, unless it's prepaid with STROJ tokens or via a partner.
+
+All our tiers have a 30 days trial period limited to 25 GB.
+
+### Goals
+
+Customers see all their usage spread through several satellites unified in a same web interface and
+their only get one charge for the entire usage per billing cycle.
+
+Customers can see the usage of each specific satellite and they receive the usage per satellite in
+the invoice details.
+
+### Approach / Design
+
+#### Globally tracking usage
+
+Each satellite has its own separated database, at this time, they use a different Spanner instance
+or database. These database aren't interconnected.
+
+Satellites send usage data into our BigQuery through
+[Eventkit](https://pkg.go.dev/storj.io/Eventkit).
+
+Eventkit is susceptible to drop events when the satellites are shutting down or the number of
+reported events is too high with the ingestion buffer capacity.
+
 These amount of dropped events may impact the total usage tracked in data warehouse and cause a
 considered deviation with the one registered in the satellite DB, which may cause a loss in revenue
 if we invoice clients based on the data warehouse tracked usage.
+
+We have to build monitoring and alerts when this happens to detect possible important misaligned
+usage.
+
+We have to document the procedure to inspect these misalignments and how to align them in case that
+they have an important revenue loss impact. Finance should establish a threshold about what's
+considered an important revenue loss.
 
 #### Unified view
 
@@ -353,8 +365,6 @@ processor, it's designed to work with them.
 
 ### Open question
 
-* Is the consistency of the currently configured Eventkit in the satellite for telemetry enough for
-  invoicing customers without a significant revenue lost?
 * Should we ingest the messages when Eventkit is tearing down instead of dropping them?
 
   Reference: https://review.dev.storj.tools/c/storj/Eventkit/+/20817/comment/5e55c7ad_01864c64/
@@ -428,3 +438,7 @@ In case that we need to use the previous system, we will swap again the feature 
 * Currently unified usage not billed yet in real-time or at the same cadence than each satellite
   shows to the customer
 * Remove the implementation of the previous billing system
+* Automate misalignments between satellite registered usage and BigQuery global usage. This document
+  requires a documented manual procedure, automating part of the process or entirely without human
+  intervention is considered out of the scope because we don't think at this time that this will be
+  required frequently.
