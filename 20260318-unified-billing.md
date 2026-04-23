@@ -274,6 +274,10 @@ Our migration tool will have to consider how to attach the clients to the new su
 will create if Stripe migration tool cannot do it and we may add other logic if we find that some of
 the Stripe's migration considerations don't fulfill our needs.
 
+The decision in how we approach the migration (e.g. Single or multiple phases) and the impact (e.g.
+Downtime or not), etc., is left to the team meeting that will be conducted to plan, design, and
+implement the migration.
+
 ## Disclaimers
 
 We are aware that using Eventkit may cause usage misalignments because of the message that are
