@@ -131,16 +131,57 @@ to context deadline exceeded.
 Batch destination is more important, in the last 24 at the time of writing this sentence the [US1 had
 dropped 30250 events](https://thanos.storj.rodeo/d/ivwnsll/satellite-Eventkit?orgId=1&from=now-24h&to=now&timezone=UTC).
 
-#### Business details
+#### Products & pricing
 
-Storj current pricing tiers are:
-* Regional: $10/TB. 1x egress per month included, additional egress $0.01/GB
-* Archive: $6/TB. Egress $0.02/GB
-* Global: $15/TB. 1x egress per month included, additional egress $0.02/GB
+Through the time, Storj has evolved its products and pricing.
 
-Minimum usage is $5/month, unless it's prepaid with STROJ tokens or via a partner.
+Storj has designed a flexible system to calculate the price of a product based on a variety of
+parameters which define the units, the unit's cost.
 
-All our tiers have a 30 days trial period limited to 25 GB.
+This is an example of a pricing configuration
+
+```yaml
+- id: 1
+  name: "one"
+  storage: "8"
+  storage-sku: "STORAGE-1"
+  egress: "10"
+  egress-sku: "EGRESS-1"
+  segment: "0.0000088"
+  segment-sku: "SEGMENT-1"
+- id: 2
+  name: "two"
+  storage: "20"
+  storage-sku: "STORAGE-2"
+  egress: "7"
+  egress-sku: "EGRESS-2"
+  egress-discount-ratio: "1"
+- id: 3
+  name: "three"
+  price-summary: "Our global "
+  short-name: "Global"
+  storage: 15
+  storage-sku: "STORAGE-3"
+  egress: 20
+  egress-sku: "EGRESS-3"
+  included-egress-sku: "EGRESS-INCLUDED-3"
+  egress-discount-ratio: 1
+  egress-overage-mode: true
+  small-object-fee: 15
+  small-object-fee-sku: "OBJECT-SMALL-FEE-3"
+  storage-remainder: "50KB"
+  use-gb-units: true
+```
+
+These are some of the main difference in what their prices involve:
+* Product (1) has segment fees, while (2) and (3) don't
+* Product (3) storage and egress units are in GB, while (1) and (2) are in bytes which is the
+  default
+* Products (2) and (3) include some egress based on the amount of storage, while (1) doesn't
+* Product (3) has a fee for small objects, while (1) and (2) don't
+
+A part of these rules, Storj started to apply a minimum usage fee when there isn't a prepayment with
+STORJ tokens or via a partner.
 
 ### Goals
 
@@ -193,7 +234,7 @@ It offer two options:
    * For more customized experiences
    * Requires more development work
 
-##### Stripe's customer portal
+##### Stripe's technical details
 
 Stripes customer portal is hosted by Stripe.
 
@@ -237,25 +278,31 @@ At the time of writing this document, the customer portal has the following limi
     can be solved creating different product versions
   * The customer portal cannot be displayed inside an iframe
 
-Because our pricing is per usage we have to use Stripe metered usage with a subscription, however,
-we cannot auto invoice the customers every month which have at least one bucket in Regional or
-Global tier because they have 1x egress included, which is variable to the storage, and Stripe
-doesn't support these kind of business rules. This implies to operates like we do nowadays, which is
-create draft invoices, add items regarding to the additional egress, and finalize them to charge our
-customers.
+Stripe metered events have a limit of 2k events/second, hence we have to push events with a retry
+backoff, and add monitoring to report if retry gives up after certain attempts.
 
-The $5/month minimum fee cannot be modeled in Stripe. We can use billing thresholds to avoid auto
-invoicing when they have lower usage and implement the logic in our process to adjust them and
-charge the clients. However, because we are only limited to use the auto invoicing only for the
-Archive tier, it isn't worth to use auto invoice at all, and invoice all the customers from our
-system.
+##### Implementation
+
+Our pricing is per usage we have to use Stripe metered usage with a subscription, however, we cannot
+auto invoice all our customers due to rules which cannot be expressed in Stripe subscriptions, for
+example:
+* Included egress
+* Minim usage fee
 
 Stripe subscriptions allow to set a free trial period with certain price, when it's set to 0, the
 subscription will be active, despite the customers won't pay anything on the invoices during that
 period.
 
-Stripe metered events have a limit of 2k events/second, hence we have to push events with a retry
-backoff, and add monitoring to report if retry gives up after certain attempts.
+Using Stripe's portal would imply to push the usage through Stripe's metered events, however, we are
+already sending all the usage to BigQuery, which allows us to offer to our customers an aggregated
+view of all their usage across satellites. Because Stripe's subscriptions cannot fit to all our
+different pricing models, we would be forced to implement certain logic to show the estimated
+invoice for the current period.
+
+We are going to implement our portal using the BigQuery and generate the invoice in Stripe similarly
+to what we currently do on each satellite and using as a base the current frontend components,
+offering to our client a portal where they will see the aggregated usage across satellites and the
+usage per each satellite from one single interface.
 
 ##### Stripe's customers migration
 
@@ -375,10 +422,6 @@ processor, it's designed to work with them.
   Note: BatchQueue must be reviewed for this purpose too.
 * Should we constantly compare usage tracked in Eventkit with the one tracked per satellite to spot
   relevant misalignments?
-* Why do we need to Eventkit and we don't report all the usage from the different satellites
-  directly to one single Stripe's account?
-* Do we need to build a portal that shows the data instead of redirecting the client to Stripe which
-  already show the next usage to bill, the billed usage, the invoices, etc?
 
 ## Reminders
 
