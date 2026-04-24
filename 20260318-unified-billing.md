@@ -175,8 +175,7 @@ This is an example of a pricing configuration
 
 These are some of the main difference in what their prices involve:
 * Product (1) has segment fees, while (2) and (3) don't
-* Product (3) storage and egress units are in GB, while (1) and (2) are in bytes which is the
-  default
+* Product (3) storage and egress units are in GB, while (1) and (2) are in MB which is the default
 * Products (2) and (3) include some egress based on the amount of storage, while (1) doesn't
 * Product (3) has a fee for small objects, while (1) and (2) don't
 
