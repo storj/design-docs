@@ -417,7 +417,7 @@ processor, it's designed to work with them.
 
 * Should we ingest the messages when Eventkit is tearing down instead of dropping them?
 
-  Reference: https://review.dev.storj.tools/c/storj/Eventkit/+/20817/comment/5e55c7ad_01864c64/
+  Reference: https://review.dev.storj.tools/c/storj/eventkit/+/20817/3/destination/parallel.go#40
   Note: BatchQueue must be reviewed for this purpose too.
 * Should we constantly compare usage tracked in Eventkit with the one tracked per satellite to spot
   relevant misalignments?
