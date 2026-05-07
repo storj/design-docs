@@ -282,26 +282,27 @@ backoff, and add monitoring to report if retry gives up after certain attempts.
 
 ##### Implementation
 
-Our pricing is per usage we have to use Stripe metered usage with a subscription, however, we cannot
-auto invoice all our customers due to rules which cannot be expressed in Stripe subscriptions, for
-example:
-* Included egress
-* Minim usage fee
-
-Stripe subscriptions allow to set a free trial period with certain price, when it's set to 0, the
-subscription will be active, despite the customers won't pay anything on the invoices during that
-period.
-
-Using Stripe's portal would imply to push the usage through Stripe's metered events, however, we are
-already sending all the usage to BigQuery, which allows us to offer to our customers an aggregated
-view of all their usage across satellites. Because Stripe's subscriptions cannot fit to all our
-different pricing models, we would be forced to implement certain logic to show the estimated
-invoice for the current period.
-
 We are going to implement our portal using the BigQuery and generate the invoice in Stripe similarly
 to what we currently do on each satellite and using as a base the current frontend components,
 offering to our client a portal where they will see the aggregated usage across satellites and the
 usage per each satellite from one single interface.
+
+Stripe subscriptions are too rigid for our pricing rules. The rules that aren't supported by Stripe
+are:
+* Included egress
+* Minim usage fee
+
+These rules provoke that we cannot delegate the whole logic to Stripe and require that we have to
+implement part of the logic.
+
+Additionally we'd have to send the usage through Stripe's metered events, which would duplicate
+what we are already doing with Eventkit to stored it in BigQuery.
+
+We disregard Stripe's subscriptions because we still have to implement custom logic and we'll incur
+in sending the same data to Stripe beside BigQuery (which will increase the network traffic) without
+providing any benefit.
+
+In summary Stripe's subscription have disadvantages without giving us any advantage.
 
 ##### Stripe's customers migration
 
@@ -316,13 +317,9 @@ conserves the customer ID, however, we will have to implement some migration too
 has an account in more than one production satellite because they currently have a different Stripe
 customer ID per satellite.
 
-Our migration tool will have to consider how to attach the clients to the new subscriptions that we
-will create if Stripe migration tool cannot do it and we may add other logic if we find that some of
-the Stripe's migration considerations don't fulfill our needs.
-
 The decision in how we approach the migration (e.g. Single or multiple phases) and the impact (e.g.
-Downtime or not), etc., is left to the team meeting that will be conducted to plan, design, and
-implement the migration.
+Downtime or not), etc., is left to the meeting that a selected team will conduct to plan the
+implementation and execution.
 
 ## Disclaimers
 
