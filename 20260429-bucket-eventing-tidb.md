@@ -51,15 +51,15 @@ The outbox table lives in the **TiDB metainfo database**, alongside the `objects
 
 ```sql
 CREATE TABLE bucket_eventing_outbox (
-    id               BIGINT        NOT NULL AUTO_INCREMENT,
-    created_at       DATETIME(6)   NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    project_id       VARBINARY(16) NOT NULL,
-    bucket_name      VARBINARY(1024) NOT NULL,
-    object_key       BLOB          NOT NULL,
-    version          BIGINT        NOT NULL,
+    id               BIGINT          NOT NULL AUTO_INCREMENT,
+    created_at       DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    project_id       VARBINARY(16)   NOT NULL,
+    bucket_name      VARBINARY(64)   NOT NULL,
+    object_key       VARBINARY(4000) NOT NULL,
+    version          BIGINT          NOT NULL,
     stream_id        VARBINARY(16),
     total_plain_size BIGINT,
-    event_type       VARCHAR(64)   NOT NULL,
+    event_type       VARCHAR(64)     NOT NULL,
     PRIMARY KEY (id)
 );
 ```
@@ -76,7 +76,12 @@ The outbox acts as its own queue. Rows are deleted only after successful Pub/Sub
 
 The outbox write is part of the **TiDB metabase transaction**, added by the TiDB adapter when `TransmitEvent: true` is set in the `TransactionOptions`. This is analogous to how the Spanner adapter sets `ExcludeTxnFromChangeStreams: false` on the Spanner transaction — it is a per-transaction option handled inside the adapter, invisible to the shared metabase logic.
 
-The `TransmitEvent` flag is already threaded through all relevant metabase operations. On the TiDB adapter, `TransmitEvent: true` causes the transaction to additionally `INSERT` the outbox row alongside the object mutation, within the same SQL transaction.
+The `TransmitEvent` flag is already threaded through all relevant metabase operations and present in the WIP TiDB adapter, but the outbox INSERT is not yet implemented. There are two integration points:
+
+- **Commit / copy / move**: `TiDBAdapter.WithTx` (in `commit_object.go`) creates a `tidbTransactionAdapter`. The `TransmitEvent` flag needs to be propagated into the adapter so that `finalizeObjectCommit`, `commitPendingCopyObject`, and `objectMove` can include the outbox INSERT in the same transaction.
+- **Delete operations**: `TiDBAdapter.deleteObjectExactVersion`, `deleteObjectLastCommittedPlain`, `DeleteObjectLastCommittedVersioned`, etc. open their own `txutil.WithTx` transactions directly, with no `tidbTransactionAdapter` involved. The outbox INSERT needs to be added inside each of these transaction closures when `TransmitEvent: true`.
+
+On the TiDB adapter, `TransmitEvent: true` causes the transaction to additionally `INSERT` the outbox row alongside the object mutation, within the same SQL transaction.
 
 The metainfo operations that trigger an outbox write (when `shouldTransmitEvent()` returns true) are the same as in Phases 1 and 2:
 
@@ -211,7 +216,7 @@ Non-exhaustive test plan:
 
 ### Rollout
 
-The TiDB eventing path is selected automatically based on the configured metabase adapter. No new configuration flags are needed beyond those already defined in Phases 1 and 2. The `bucket_eventing_outbox` table is added to the TiDB metainfo database migration.
+The TiDB eventing path is selected automatically based on the configured metabase adapter. No new configuration flags are needed beyond those already defined in Phases 1 and 2. The `bucket_eventing_outbox` table is added as a new step in `TiDBAdapter.TiDBMigration()`.
 
 ### Rollback
 
