@@ -32,7 +32,8 @@ This document describes how to implement bucket eventing for the TiDB metainfo d
 
 - Implement bucket eventing for the TiDB metainfo database variant with the same external behavior as the Spanner-based implementation.
 - Preserve at-least-once event delivery with no ordering or deduplication guarantees (same as Phase 1).
-- Reuse the existing `bucket_eventing_configs` table, `eventing.Service`, S3 event transformation, and Pub/Sub publishing without modification.
+- Reuse the existing `bucket_eventing_configs` table, S3 event transformation, and Pub/Sub publishing without modification.
+- Refactor `eventing.Service` to be backend-agnostic via an `EventSource` interface, so the Spanner and TiDB paths share all filtering, translation, and publishing logic.
 - Keep Spanner-based bucket eventing fully operational and unaffected.
 
 ### Approach / Design
@@ -68,13 +69,15 @@ CREATE TABLE bucket_eventing_outbox (
 - `event_type`: Written directly by the metainfo layer. No inference from transaction tags needed.
 - `stream_id` + `version`: Used to construct the S3-compatible `versionId` field (`StreamVersionID`), same as the Spanner path.
 
-#### No Cursor Needed
+#### No Persistent Cursor Needed
 
-The outbox acts as its own queue. Rows are deleted only after successful Pub/Sub delivery confirmation. Whatever remains in the table is by definition unprocessed, so on worker restart the worker simply reads from the beginning of the table and picks up where it left off. No separate cursor state is needed.
+The outbox acts as its own queue. Rows are deleted only after successful Pub/Sub delivery confirmation. Whatever remains in the table is by definition unprocessed, so on worker restart the worker simply reads from the beginning of the table and picks up where it left off. No cursor state needs to be persisted to a database.
+
+The worker does maintain an in-memory `lastSeenID` while running, so the reader goroutine can skip rows already handed to the publisher goroutine within the same run. This is purely a performance optimization — on restart it resets to 0, causing any undeleted rows to be re-read and re-published, which is correct under at-least-once delivery.
 
 #### Writing to the Outbox
 
-The outbox write is part of the **TiDB metabase transaction**, added by the TiDB adapter when `TransmitEvent: true` is set in the `TransactionOptions`. This is analogous to how the Spanner adapter sets `ExcludeTxnFromChangeStreams: false` on the Spanner transaction — it is a per-transaction option handled inside the adapter, invisible to the shared metabase logic.
+The outbox write is part of the **TiDB metabase transaction**, added by the TiDB adapter when `TransmitEvent: true` is set in the `TransactionOptions`. This is analogous to how the Spanner adapter sets `ExcludeTxnFromChangeStreams` to `!TransmitEvent` on the Spanner transaction — it is a per-transaction option handled inside the adapter, invisible to the shared metabase logic.
 
 The `TransmitEvent` flag is already threaded through all relevant metabase operations and present in the WIP TiDB adapter, but the outbox INSERT is not yet implemented. There are two integration points:
 
@@ -97,57 +100,113 @@ The metainfo operations that trigger an outbox write (when `shouldTransmitEvent(
 | `DeleteObjectExactVersion` | `ObjectRemoved:Delete` |
 | `DeleteAllBucketObjects` | `ObjectRemoved:Delete` (one entry per deleted object) |
 
+#### EventSource Interface
+
+`eventing.Service` is refactored to be backend-agnostic by introducing an `EventSource` interface. The service holds an `EventSource` instead of a `changestream.Adapter`, and `Run()` drives it. All filtering, project-ID resolution, translation to S3 `EventRecord`, and publishing logic stays in the service and is shared by both backends.
+
+```go
+// EventSource abstracts over the backend-specific record delivery loop.
+// Implementations decode backend records into ChangeEvents and call fn for each one.
+// Run blocks until ctx is cancelled or a permanent error occurs.
+type EventSource interface {
+    Run(ctx context.Context, fn func(event ChangeEvent) (PendingResult, error)) error
+}
+```
+
+`ChangeEvent` is a new backend-neutral struct carrying the decoded fields the service needs: `ProjectID` (private), `BucketName`, `ObjectKey`, `EventName`, `TotalPlainSize`, `StreamID`, `Version`, `CommitTimestamp`. The name `ChangeEvent` avoids collision with `notification.EventRecord`, which is the S3-shaped output struct produced later by the service.
+
+`PendingResult` moves from the `changestream` package to the `eventing` package as part of this refactor. `SpannerEventSource` and `TiDBEventSource` both return `eventing.PendingResult`; `changestream` imports it from there instead of defining it.
+
+- **`SpannerEventSource`** — wraps `changestream.Processor`, decodes each `DataChangeRecord` into a `ChangeEvent` (refactoring the existing `ConvertModsToEvent` + `ProcessRecord` logic).
+- **`TiDBEventSource`** — decodes each outbox row into a `ChangeEvent` and calls `fn`. Implements the two-goroutine outbox polling loop described below.
+
 #### Outbox Worker
 
-A new `TiDBEventingService` (or a TiDB-specific run mode of the existing `eventing.Service`) replaces the Spanner `changestream.Processor` loop. It runs as the same `satellite changestream` command, selected based on the configured metabase adapter.
+`TiDBEventSource` implements `EventSource`. It runs as the same `satellite changestream` command. The adapter selection happens in `satellite/mud.go`, which currently provides `changestream.Adapter` by type-asserting `metabase.Adapter` to `changestream.Adapter` and panicking if it is not Spanner. This needs to be replaced with a conditional that provides a `SpannerEventSource` for Spanner adapters and a `TiDBEventSource` for TiDB adapters.
 
-The worker loop:
+The worker uses two goroutines connected by a buffered channel of capacity 1 to pipeline database reads with Pub/Sub publishing, matching the throughput of the Spanner `partitionDrainer` approach. While one batch is awaiting Pub/Sub confirmation, the reader goroutine is already fetching the next batch. A capacity of 1 keeps at most two batches in memory at once (one being published, one pre-fetched) while still providing the full pipeline benefit.
+
+**Reader goroutine** — polls the outbox and sends batches to the publisher:
 
 ```
+lastSeenID = 0  # in-memory only; resets to 0 on restart
 loop:
   rows = SELECT id, project_id, bucket_name, object_key, version,
                 stream_id, total_plain_size, event_type
          FROM bucket_eventing_outbox
+         WHERE id > lastSeenID
          ORDER BY id
-         LIMIT 100
+         LIMIT $batchSize  # tidb-batch-size, default 100
 
   if no rows:
-    sleep $pollInterval  # e.g. 100ms
+    sleep $pollInterval  # tidb-poll-interval, default 100ms
     continue
 
-  for each row:
-    look up bucket notification config (existing in-memory LRU cache + DB fallback)
-    if no config or event type / filter does not match: skip
-    translate row to EventRecord (see below)
-    publish to Pub/Sub (existing publisher, PendingResult pattern)
-    await confirmation
-    DELETE FROM bucket_eventing_outbox WHERE id = $row.id
+  lastSeenID = rows[last].id
+  send rows → batchCh  # buffered(1): blocks only if publisher has two batches already
 ```
 
-On startup, the worker reads from the beginning of the table. Rows that were not yet deleted (because the previous worker run did not confirm delivery) are reprocessed, fulfilling at-least-once delivery. No cursor state needs to be persisted separately.
+**Publisher goroutine** — decodes each batch into `ChangeEvent`s, calls `fn` (the service), and deletes confirmed rows:
+
+```
+loop:
+  batch = receive from batchCh
+
+  pendingResults = []
+  for each row in batch:
+    event = ChangeEvent{
+        ProjectID:       row.project_id,
+        BucketName:      row.bucket_name,
+        ObjectKey:       row.object_key,
+        EventName:       row.event_type,
+        TotalPlainSize:  row.total_plain_size,
+        StreamID:        row.stream_id,
+        Version:         row.version,
+        CommitTimestamp: row.created_at,
+    }
+    result, err = fn(event)  # fn is eventing.Service: filters, resolves project ID, publishes
+    if err != nil: return err
+    # fn returns ImmediateResult (not nil) for skipped events (no config, filtered out)
+    pendingResults.append((row.id, result))
+
+  confirmedIDs = []
+  for each (id, result) in pendingResults:
+    if err = result.Get(ctx); err != nil: return err
+    confirmedIDs.append(id)
+
+  DELETE FROM bucket_eventing_outbox WHERE id IN (confirmedIDs)
+```
+
+On startup, `lastSeenID` resets to 0, so any rows not yet deleted (unconfirmed delivery from the previous run) are re-read and re-published, fulfilling at-least-once delivery. No cursor state needs to be persisted.
+
+The channel between the goroutines provides natural backpressure: if Pub/Sub is slow, the publisher goroutine stalls on `result.Get()`, the channel fills, and the reader blocks on `send rows → batchCh` until the publisher catches up.
+
+**Error handling**: if `result.Get()` returns an infrastructure error (e.g. context cancellation, transient Pub/Sub failure) mid-batch, the publisher goroutine returns the error immediately. The batch `DELETE` is not executed, so all rows in the batch remain in the outbox. Both goroutines exit, the worker restarts, `lastSeenID` resets to 0, and all undeleted rows — including any that were already confirmed earlier in the same batch — are re-published. This is correct under at-least-once delivery. User-configuration errors (e.g. deleted topic, missing permissions) are handled inside `publisher.Publish()` and cause `result.Get()` to return nil, so they do not abort the batch.
 
 #### Translating Outbox Rows to S3 Events
 
-The outbox row contains all fields needed to build the `EventRecord` directly. The existing `notification.go` types (`Event`, `EventRecord`, `EncodeForS3Event`, `MatchEventType`, `MatchFilters`) are reused without modification.
+`TiDBEventSource` decodes each outbox row into a `ChangeEvent` (shown in the pseudocode above) and passes it to the service via `fn`. The service then applies filtering, resolves the private project ID to the public project ID via `CachedPublicProjectIDs.GetPublicID()`, and constructs the S3 `notification.EventRecord`. The existing `notification.go` types (`Event`, `EventRecord`, `EncodeForS3Event`, `MatchEventType`, `MatchFilters`) are reused without modification.
 
-| Outbox column | `EventRecord` field |
+The mapping from outbox columns to `ChangeEvent` fields is one-to-one with no encoding or decoding — the SQL driver scans binary columns directly into the same Go types the struct carries. The service maps `ChangeEvent` to `notification.EventRecord` as follows:
+
+| `ChangeEvent` field | `notification.EventRecord` field |
 |---|---|
-| `created_at` | `eventTime` |
-| `event_type` | `eventName` (prefixed with `s3:`) |
-| `bucket_name` | `s3.bucket.name`, `s3.bucket.arn` |
-| `project_id` | Resolved to public project ID → `s3.bucket.ownerIdentity.principalId` |
-| `object_key` | URL-encoded → `s3.object.key` |
-| `total_plain_size` | `s3.object.size` |
-| `stream_id` + `version` | `NewStreamVersionID(version, streamID)` hex-encoded → `s3.object.versionId` |
-| `created_at` (Unix nanos) | 16-char uppercase hex → `s3.object.sequencer` |
+| `CommitTimestamp` | `eventTime` |
+| `EventName` | `eventName` (prefixed with `s3:`) |
+| `BucketName` | `s3.bucket.name`, `s3.bucket.arn` |
+| `ProjectID` (resolved to public) | `s3.bucket.ownerIdentity.principalId` |
+| `ObjectKey` | URL-encoded → `s3.object.key` |
+| `TotalPlainSize` | `s3.object.size` |
+| `StreamID` + `Version` | `NewStreamVersionID(Version, StreamID)` hex-encoded → `s3.object.versionId` |
+| `CommitTimestamp` (Unix nanos) | 16-char uppercase hex → `s3.object.sequencer` |
 
-The `ConvertModsToEvent()` function in `notification.go` is **not used** for the TiDB path — a new `ConvertOutboxRowToEvent()` function constructs the `EventRecord` directly from the typed outbox columns, with no JSON parsing or `spanner.NullJSON` involved.
+The `ConvertModsToEvent()` function in `notification.go` is **not used** for the TiDB path — it is Spanner-specific (`spanner.NullJSON`, transaction tag inference) and moves into `SpannerEventSource`.
 
-#### No Changes to the Spanner Path
+#### Impact on the Spanner Path
 
-The `TransmitEvent` flag, `ExcludeTxnFromChangeStreams`, `changestream.Adapter`, `changestream.Processor`, `MetadataBatcher`, `partitionDrainer`, and `bucket_eventing_metadata` are all unchanged. The TiDB path is additive: new code in the metainfo layer and a new worker loop, selected at runtime based on the configured adapter.
+`changestream.Processor`, `MetadataBatcher`, `partitionDrainer`, `bucket_eventing_metadata`, `TransmitEvent`, and `ExcludeTxnFromChangeStreams` are all unchanged. The Spanner backend is wrapped in `SpannerEventSource` which implements the new `EventSource` interface — a mechanical refactor with no behavioral change.
 
-The `notification.go` dependency on `spanner.NullJSON` and `cloud.google.com/go/spanner` is isolated to the Spanner path and does not need to be touched.
+The `notification.go` dependency on `spanner.NullJSON` and `cloud.google.com/go/spanner` moves into `SpannerEventSource`, keeping it isolated from the shared service logic and from the TiDB path.
 
 #### Relation to Phase 2 and Later Changes
 
@@ -159,7 +218,7 @@ The TiDB implementation inherits all current bucket eventing features:
 - In-memory LRU caching for bucket notification configs is reused.
 - `shouldTransmitEvent()` is reused without modification.
 - Satellite-managed encryption requirement is enforced.
-- Async Pub/Sub delivery via `PendingResult` is reused — the worker calls `Publish` and confirms delivery asynchronously before deleting the outbox row.
+- Async Pub/Sub delivery via the `eventing.PendingResult` interface is reused — `TiDBEventSource` calls `Publish` (non-blocking) and confirms delivery via `result.Get()` before deleting the outbox row.
 
 The only Spanner-specific mechanism that does not apply to TiDB is `ExcludeTxnFromChangeStreams` — TiDB has no equivalent, and cost filtering is handled instead by `shouldTransmitEvent()` already gating the outbox write.
 
@@ -193,13 +252,21 @@ Rejected because:
 
 ### Security / Privacy
 
-The private project ID must never appear in outbox rows written to logs, in event notification messages, or in error messages. The worker resolves the private project ID to the public project ID using the same `CachedPublicProjectIDs` wrapper as the Spanner path before constructing the `EventRecord`.
+The private project ID must never appear in outbox rows written to logs, in event notification messages, or in error messages. The worker resolves the private project ID to the public project ID using the same `CachedPublicProjectIDs` wrapper as the Spanner path before constructing the `notification.EventRecord`.
 
 ### Observability
 
-The outbox worker should report:
-- Lag: `created_at` of the oldest unprocessed row (`SELECT created_at FROM bucket_eventing_outbox ORDER BY id LIMIT 1`) vs. current time. A growing lag indicates the worker is falling behind. Equivalent to the "lagging watermark" metric from the Spanner path.
-- Publish success / failure counts per bucket, reusing the existing `publish_success` and `publish_failed` eventkit events.
+The two-goroutine pipeline has three potential bottlenecks: the outbox read, the Pub/Sub publish, and the outbox delete. Each should be independently observable.
+
+**End-to-end lag** — `created_at` of the oldest unprocessed row (`SELECT created_at FROM bucket_eventing_outbox ORDER BY id LIMIT 1`) vs. current time. A growing lag indicates the worker is falling behind regardless of which stage is the bottleneck. Equivalent to the "lagging watermark" metric from the Spanner path.
+
+**Outbox read latency** — monkit `mon.Task()` on the reader's SELECT query. Spikes here point to TiDB being the bottleneck (slow query, lock contention, or large table scan).
+
+**Pub/Sub publish latency and outcome** — reuse the existing `publish_success` and `publish_failed` eventkit events from `pubsub.go`, which already include end-to-end publish latency (time from `Publish()` call to `result.Get()` returning). Spikes here point to Pub/Sub being the bottleneck.
+
+**Outbox delete latency** — monkit `mon.Task()` on the `DELETE WHERE id IN (...)` call. Spikes here point to TiDB write throughput being the bottleneck.
+
+**Pipeline pressure** — the batch channel capacity between the two goroutines. When the channel is full, the reader is blocked waiting for the publisher to catch up (Pub/Sub or delete is the bottleneck). When the channel is empty, the publisher is blocked waiting for the reader (TiDB read is the bottleneck). Report the current channel fill level as a gauge metric.
 
 ### Test plan
 
@@ -212,11 +279,18 @@ Non-exhaustive test plan:
 - Verify at-least-once delivery: stop the worker, perform uploads and deletes, restart the worker, and confirm all events are delivered without loss.
 - Verify that outbox entries are deleted only after successful Pub/Sub confirmation.
 - Verify that removing a bucket notification config causes no further outbox writes for that bucket.
-- Verify that the Spanner-based eventing path is unaffected.
+- Verify that the Spanner-based eventing path produces identical output before and after the `SpannerEventSource` refactor.
 
 ### Rollout
 
-The TiDB eventing path is selected automatically based on the configured metabase adapter. No new configuration flags are needed beyond those already defined in Phases 1 and 2. The `bucket_eventing_outbox` table is added as a new step in `TiDBAdapter.TiDBMigration()`.
+The TiDB eventing path is selected automatically based on the configured metabase adapter. The `bucket_eventing_outbox` table is added as a new step in `TiDBAdapter.TiDBMigration()`.
+
+Two new fields are added to `eventing.Config` for the TiDB path:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--eventing.tidb-poll-interval` | `100ms` | How long the reader goroutine sleeps when the outbox is empty. |
+| `--eventing.tidb-batch-size` | `100` | Maximum number of outbox rows fetched per SELECT. |
 
 ### Rollback
 
