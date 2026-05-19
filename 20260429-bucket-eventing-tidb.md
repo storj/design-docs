@@ -115,7 +115,7 @@ type EventSource interface {
 
 `ChangeEvent` is a new backend-neutral struct carrying the decoded fields the service needs: `ProjectID` (private), `BucketName`, `ObjectKey`, `EventName`, `TotalPlainSize`, `StreamID`, `Version`, `CommitTimestamp`. The name `ChangeEvent` avoids collision with `notification.EventRecord`, which is the S3-shaped output struct produced later by the service.
 
-`PendingResult` moves from the `changestream` package to the `eventing` package as part of this refactor. `SpannerEventSource` and `TiDBEventSource` both return `eventing.PendingResult`; `changestream` imports it from there instead of defining it.
+`PendingResult` moves from the `changestream` package to the `eventing` package as part of this refactor. `SpannerEventSource` and `TiDBEventSource` both return `eventing.PendingResult`; `changestream` imports it from there instead of defining it. The `partitionDrainer` logic also moves to `eventing` and is generalised with a confirmation callback, so both `SpannerEventSource` (advancing a watermark) and `TiDBEventSource` (collecting confirmed IDs) reuse the same `drainReady` / `drainAll` implementation.
 
 - **`SpannerEventSource`** — wraps `changestream.Processor`, decodes each `DataChangeRecord` into a `ChangeEvent` (refactoring the existing `ConvertModsToEvent` + `ProcessRecord` logic).
 - **`TiDBEventSource`** — decodes each outbox row into a `ChangeEvent` and calls `fn`. Implements the two-goroutine outbox polling loop described below.
@@ -151,8 +151,8 @@ loop:
 ```
 loop:
   batch = receive from batchCh
+  drainer = new outboxDrainer()  # see below
 
-  pendingResults = []
   for each row in batch:
     event = ChangeEvent{
         ProjectID:       row.project_id,
@@ -167,21 +167,23 @@ loop:
     result, err = fn(event)  # fn is eventing.Service: filters, resolves project ID, publishes
     if err != nil: return err
     # fn returns ImmediateResult (not nil) for skipped events (no config, filtered out)
-    pendingResults.append((row.id, result))
+    drainer.add(row.id, result)  # opportunistically drains already-confirmed results
 
-  confirmedIDs = []
-  for each (id, result) in pendingResults:
-    if err = result.Get(ctx); err != nil: return err
-    confirmedIDs.append(id)
+  confirmedIDs, err = drainer.drainAll(ctx)  # block until all remaining results confirm
+  if err != nil: return err
 
   DELETE FROM bucket_eventing_outbox WHERE id IN (confirmedIDs)
 ```
 
+The draining logic follows the same `drainReady` / `drainAll` pattern as `changestream/drainer.go`. After each `fn()` call, `drainer.add()` non-blockingly harvests any results that have already resolved (via `PendingResult.Ready()`), so fast Pub/Sub confirmations are reaped immediately without waiting for the full batch. `drainAll()` at the end of the batch blocks on any remaining unconfirmed results. This avoids head-of-line blocking: a single slow confirmation does not prevent earlier fast ones from being collected.
+
+`outboxDrainer` is a TiDB-specific variant of `partitionDrainer`. Instead of advancing a Spanner watermark, it collects confirmed row IDs for the batched `DELETE`. Since `PendingResult` moves to the `eventing` package, `outboxDrainer` and `partitionDrainer` can share the same draining logic parameterised by a confirmation callback.
+
 On startup, `lastSeenID` resets to 0, so any rows not yet deleted (unconfirmed delivery from the previous run) are re-read and re-published, fulfilling at-least-once delivery. No cursor state needs to be persisted.
 
-The channel between the goroutines provides natural backpressure: if Pub/Sub is slow, the publisher goroutine stalls on `result.Get()`, the channel fills, and the reader blocks on `send rows → batchCh` until the publisher catches up.
+The channel between the goroutines provides natural backpressure: if Pub/Sub is slow, `drainer.add()` eventually blocks (once the pending queue reaches `pendingDrainSize`, matching the Spanner drainer behaviour), the channel fills, and the reader blocks on `send rows → batchCh` until the publisher catches up.
 
-**Error handling**: if `result.Get()` returns an infrastructure error (e.g. context cancellation, transient Pub/Sub failure) mid-batch, the publisher goroutine returns the error immediately. The batch `DELETE` is not executed, so all rows in the batch remain in the outbox. Both goroutines exit, the worker restarts, `lastSeenID` resets to 0, and all undeleted rows — including any that were already confirmed earlier in the same batch — are re-published. This is correct under at-least-once delivery. User-configuration errors (e.g. deleted topic, missing permissions) are handled inside `publisher.Publish()` and cause `result.Get()` to return nil, so they do not abort the batch.
+**Error handling**: if any `result.Get()` returns an infrastructure error (e.g. context cancellation, transient Pub/Sub failure), the drainer returns it immediately. The batch `DELETE` is not executed, so all rows in the batch remain in the outbox. Both goroutines exit, the worker restarts, `lastSeenID` resets to 0, and all undeleted rows are re-published. This is correct under at-least-once delivery. User-configuration errors (e.g. deleted topic, missing permissions) are handled inside `publisher.Publish()` and cause `result.Get()` to return nil, so they do not abort the batch.
 
 #### Translating Outbox Rows to S3 Events
 
@@ -204,7 +206,7 @@ The `ConvertModsToEvent()` function in `notification.go` is **not used** for the
 
 #### Impact on the Spanner Path
 
-`changestream.Processor`, `MetadataBatcher`, `partitionDrainer`, `bucket_eventing_metadata`, `TransmitEvent`, and `ExcludeTxnFromChangeStreams` are all unchanged. The Spanner backend is wrapped in `SpannerEventSource` which implements the new `EventSource` interface — a mechanical refactor with no behavioral change.
+`changestream.Processor`, `MetadataBatcher`, `bucket_eventing_metadata`, `TransmitEvent`, and `ExcludeTxnFromChangeStreams` are all unchanged. The Spanner backend is wrapped in `SpannerEventSource` which implements the new `EventSource` interface. `partitionDrainer` is moved to the `eventing` package and generalised with a confirmation callback — `SpannerEventSource` passes a watermark-advancing callback, preserving identical behaviour. No external behaviour changes.
 
 The `notification.go` dependency on `spanner.NullJSON` and `cloud.google.com/go/spanner` moves into `SpannerEventSource`, keeping it isolated from the shared service logic and from the TiDB path.
 
@@ -262,7 +264,7 @@ The two-goroutine pipeline has three potential bottlenecks: the outbox read, the
 
 **Outbox read latency** — monkit `mon.Task()` on the reader's SELECT query. Spikes here point to TiDB being the bottleneck (slow query, lock contention, or large table scan).
 
-**Pub/Sub publish latency and outcome** — reuse the existing `publish_success` and `publish_failed` eventkit events from `pubsub.go`, which already include end-to-end publish latency (time from `Publish()` call to `result.Get()` returning). Spikes here point to Pub/Sub being the bottleneck.
+**Pub/Sub publish latency and outcome** — reuse the existing `publish_success` and `publish_failed` eventkit events from `pubsub.go`, which already include end-to-end publish latency (time from `Publish()` call to `result.Get()` returning). Spikes here point to Pub/Sub being the bottleneck. For the TiDB path, `PublishMetadata.TransactionTag` (a Spanner concept) is not applicable — `EventName` from the `ChangeEvent` serves the same observability purpose and is already a field in `PublishMetadata`.
 
 **Outbox delete latency** — monkit `mon.Task()` on the `DELETE WHERE id IN (...)` call. Spikes here point to TiDB write throughput being the bottleneck.
 
