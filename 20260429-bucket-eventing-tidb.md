@@ -52,21 +52,21 @@ The outbox table lives in the **TiDB metainfo database**, alongside the `objects
 
 ```sql
 CREATE TABLE bucket_eventing_outbox (
-    id               BIGINT          NOT NULL AUTO_INCREMENT,
-    created_at       DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    project_id       VARBINARY(16)   NOT NULL,
-    bucket_name      VARBINARY(64)   NOT NULL,
-    object_key       VARBINARY(4000) NOT NULL,
-    version          BIGINT          NOT NULL,
-    stream_id        VARBINARY(16),
-    total_plain_size BIGINT,
-    event_type       VARCHAR(64)     NOT NULL,
+    id               BIGINT           NOT NULL AUTO_INCREMENT,
+    project_id       VARBINARY(16)    NOT NULL,
+    bucket_name      VARBINARY(64)    NOT NULL,
+    object_key       VARBINARY(12200) NOT NULL,
+    version          BIGINT           NOT NULL,
+    stream_id        VARBINARY(16)    NOT NULL,
+    total_plain_size BIGINT           NOT NULL,
+    event_name       VARCHAR(64)      NOT NULL,
+    created_at       DATETIME(6)      NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     PRIMARY KEY (id)
 );
 ```
 
 - `id`: Auto-incrementing primary key, used for ordered polling.
-- `event_type`: Written directly by the metainfo layer. No inference from transaction tags needed.
+- `event_name`: Written directly by the metainfo layer without the `s3:` prefix (e.g. `ObjectCreated:Put`). No inference from transaction tags needed.
 - `stream_id` + `version`: Used to construct the S3-compatible `versionId` field (`StreamVersionID`), same as the Spanner path.
 
 #### No Persistent Cursor Needed
@@ -79,7 +79,7 @@ The worker does maintain an in-memory `lastSeenID` while running, so the reader 
 
 The outbox write is part of the **TiDB metabase transaction**, added by the TiDB adapter when `TransmitEvent: true` is set in the `TransactionOptions`. This is analogous to how the Spanner adapter sets `ExcludeTxnFromChangeStreams` to `!TransmitEvent` on the Spanner transaction — it is a per-transaction option handled inside the adapter, invisible to the shared metabase logic.
 
-The `TransmitEvent` flag is already threaded through all relevant metabase operations and present in the WIP TiDB adapter, but the outbox INSERT is not yet implemented. There are two integration points:
+The `TransmitEvent` flag is threaded through all relevant metabase operations. There are two integration points where the TiDB adapter writes outbox rows:
 
 - **Commit / copy / move**: `TiDBAdapter.WithTx` (in `commit_object.go`) creates a `tidbTransactionAdapter`. The `TransmitEvent` flag needs to be propagated into the adapter so that `finalizeObjectCommit`, `commitPendingCopyObject`, and `objectMove` can include the outbox INSERT in the same transaction.
 - **Delete operations**: `TiDBAdapter.deleteObjectExactVersion`, `deleteObjectLastCommittedPlain`, `DeleteObjectLastCommittedVersioned`, etc. open their own `txutil.WithTx` transactions directly, with no `tidbTransactionAdapter` involved. The outbox INSERT needs to be added inside each of these transaction closures when `TransmitEvent: true`.
@@ -91,13 +91,15 @@ The metainfo operations that trigger an outbox write (when `shouldTransmitEvent(
 | Metainfo operation | Event type written to outbox |
 |---|---|
 | `CommitInlineObject` | `ObjectCreated:Put` |
-| `CommitObjectWithSegments` | `ObjectCreated:Put` |
+| `CommitObject` (with segments) | `ObjectCreated:Put` |
 | `FinishCopyObject` | `ObjectCreated:Copy` |
 | `FinishMoveObject` (destination) | `ObjectCreated:Copy` |
 | `FinishMoveObject` (source) | `ObjectRemoved:Delete` |
 | `DeleteObjectLastCommitted` (unversioned) | `ObjectRemoved:Delete` |
 | `DeleteObjectLastCommitted` (versioned) | `ObjectRemoved:DeleteMarkerCreated` |
 | `DeleteObjectExactVersion` | `ObjectRemoved:Delete` |
+| `DeleteObjectExactVersion` (object-lock bucket) | `ObjectRemoved:Delete` |
+| `DeleteObjectLastCommitted` (unversioned, object-lock bucket) | `ObjectRemoved:Delete` |
 | `DeleteAllBucketObjects` | `ObjectRemoved:Delete` (one entry per deleted object) |
 
 #### EventSource Interface
@@ -107,24 +109,24 @@ The metainfo operations that trigger an outbox write (when `shouldTransmitEvent(
 ```go
 // EventSource abstracts over the backend-specific record delivery loop.
 // Implementations decode backend records into ChangeEvents and call fn for each one.
-// Run blocks until ctx is cancelled or a permanent error occurs.
+// Listen blocks until ctx is cancelled or a permanent error occurs.
 type EventSource interface {
-    Run(ctx context.Context, fn func(event ChangeEvent) (PendingResult, error)) error
+    Listen(ctx context.Context, fn func(event ChangeEvent) (PendingResult, error)) error
 }
 ```
 
 `ChangeEvent` is a new backend-neutral struct carrying the decoded fields the service needs: `ProjectID` (private), `BucketName`, `ObjectKey`, `EventName`, `TotalPlainSize`, `StreamID`, `Version`, `CommitTimestamp`. The name `ChangeEvent` avoids collision with `notification.EventRecord`, which is the S3-shaped output struct produced later by the service.
 
-`PendingResult` moves from the `changestream` package to the `eventing` package as part of this refactor. `SpannerEventSource` and `TiDBEventSource` both return `eventing.PendingResult`; `changestream` imports it from there instead of defining it. The `partitionDrainer` logic also moves to `eventing` and is generalised with a confirmation callback, so both `SpannerEventSource` (advancing a watermark) and `TiDBEventSource` (collecting confirmed IDs) reuse the same `drainReady` / `drainAll` implementation.
+`eventing.PendingResult` is a type alias for `changestream.PendingResult`, which remains the authoritative definition. Both `SpannerEventSource` and `TiDBEventSource` use `eventing.PendingResult`. The `partitionDrainer` remains in the `changestream` package and is used only by `SpannerEventSource`; `TiDBEventSource` uses a separate `outboxDrainer` type described below.
 
-- **`SpannerEventSource`** — wraps `changestream.Processor`, decodes each `DataChangeRecord` into a `ChangeEvent` (refactoring the existing `ConvertModsToEvent` + `ProcessRecord` logic).
-- **`TiDBEventSource`** — decodes each outbox row into a `ChangeEvent` and calls `fn`. Implements the two-goroutine outbox polling loop described below.
+- **`SpannerEventSource`** — wraps `changestream.Processor`, decodes each `DataChangeRecord` into a `ChangeEvent` via `ConvertModsToEvents` (defined in `source_spanner.go`).
+- **`TiDBEventSource`** — decodes each outbox row into a `ChangeEvent` and calls `fn`. Implements the three-goroutine outbox polling loop described below.
 
 #### Outbox Worker
 
 `TiDBEventSource` implements `EventSource`. It runs as the same `satellite changestream` command. The adapter selection happens in `satellite/mud.go`, which currently provides `changestream.Adapter` by type-asserting `metabase.Adapter` to `changestream.Adapter` and panicking if it is not Spanner. This needs to be replaced with a conditional that provides a `SpannerEventSource` for Spanner adapters and a `TiDBEventSource` for TiDB adapters.
 
-The worker uses two goroutines connected by a buffered channel of capacity 1 to pipeline database reads with Pub/Sub publishing, matching the throughput of the Spanner `partitionDrainer` approach. While one batch is awaiting Pub/Sub confirmation, the reader goroutine is already fetching the next batch. A capacity of 1 keeps at most two batches in memory at once (one being published, one pre-fetched) while still providing the full pipeline benefit.
+The worker uses three goroutines: a reader, a publisher, and a drainer. The reader and publisher are connected by a buffered channel of capacity 1 (`batchCh`); the publisher and drainer are connected by a buffered channel of capacity `batchSize` (`pendingCh`). While one batch is awaiting Pub/Sub confirmation, the reader goroutine is already fetching the next batch. A capacity of 1 on `batchCh` keeps at most two batches in memory at once (one being published, one pre-fetched) while still providing the full pipeline benefit.
 
 **Reader goroutine** — polls the outbox and sends batches to the publisher:
 
@@ -132,7 +134,7 @@ The worker uses two goroutines connected by a buffered channel of capacity 1 to 
 lastSeenID = 0  # in-memory only; resets to 0 on restart
 loop:
   rows = SELECT id, project_id, bucket_name, object_key, version,
-                stream_id, total_plain_size, event_type
+                stream_id, total_plain_size, event_name, created_at
          FROM bucket_eventing_outbox
          WHERE id > lastSeenID
          ORDER BY id
@@ -146,19 +148,18 @@ loop:
   send rows → batchCh  # buffered(1): blocks only if publisher has two batches already
 ```
 
-**Publisher goroutine** — decodes each batch into `ChangeEvent`s, calls `fn` (the service), and deletes confirmed rows:
+**Publisher goroutine** — decodes each batch row into a `ChangeEvent`, calls `fn` (the service), and forwards the result to the drainer:
 
 ```
 loop:
   batch = receive from batchCh
-  drainer = new outboxDrainer()  # see below
 
   for each row in batch:
     event = ChangeEvent{
         ProjectID:       row.project_id,
         BucketName:      row.bucket_name,
         ObjectKey:       row.object_key,
-        EventName:       row.event_type,
+        EventName:       row.event_name,
         TotalPlainSize:  row.total_plain_size,
         StreamID:        row.stream_id,
         Version:         row.version,
@@ -167,23 +168,32 @@ loop:
     result, err = fn(event)  # fn is eventing.Service: filters, resolves project ID, publishes
     if err != nil: return err
     # fn returns ImmediateResult (not nil) for skipped events (no config, filtered out)
-    drainer.add(row.id, result)  # opportunistically drains already-confirmed results
-
-  confirmedIDs, err = drainer.drainAll(ctx)  # block until all remaining results confirm
-  if err != nil: return err
-
-  DELETE FROM bucket_eventing_outbox WHERE id IN (confirmedIDs)
+    send {row.id, result} → pendingCh  # buffered(batchSize)
 ```
 
-The draining logic follows the same `drainReady` / `drainAll` pattern as `changestream/drainer.go`. After each `fn()` call, `drainer.add()` non-blockingly harvests any results that have already resolved (via `PendingResult.Ready()`), so fast Pub/Sub confirmations are reaped immediately without waiting for the full batch. `drainAll()` at the end of the batch blocks on any remaining unconfirmed results. This avoids head-of-line blocking: a single slow confirmation does not prevent earlier fast ones from being collected.
+**Drainer goroutine** — collects confirmed results and deletes rows on a ticker cadence:
 
-`outboxDrainer` is a TiDB-specific variant of `partitionDrainer`. Instead of advancing a Spanner watermark, it collects confirmed row IDs for the batched `DELETE`. Since `PendingResult` moves to the `eventing` package, `outboxDrainer` and `partitionDrainer` can share the same draining logic parameterised by a confirmation callback.
+```
+ticker = time.NewTicker($pollInterval)
+loop:
+  select:
+    case <-ticker.C:
+      DELETE FROM bucket_eventing_outbox WHERE id IN (drainer.drainReady())
+    case entry = receive from pendingCh:
+      drainer.add(entry.id, entry.result)
+      if len(drainer.pending) >= batchSize:
+        # apply backpressure: wait for oldest, then flush
+        oldestID = drainer.drainOldest(ctx)
+        DELETE FROM bucket_eventing_outbox WHERE id IN (drainer.drainReady() + oldestID)
+```
+
+`outboxDrainer` collects `{id, PendingResult}` pairs and exposes `drainReady()` (non-blocking harvest of already-confirmed results) and `drainOldest()` (blocking wait on the oldest pending entry). It is specific to the TiDB path and does not reuse `partitionDrainer` from the Spanner path.
 
 On startup, `lastSeenID` resets to 0, so any rows not yet deleted (unconfirmed delivery from the previous run) are re-read and re-published, fulfilling at-least-once delivery. No cursor state needs to be persisted.
 
-The channel between the goroutines provides natural backpressure: if Pub/Sub is slow, `drainer.add()` eventually blocks (once the pending queue reaches `pendingDrainSize`, matching the Spanner drainer behaviour), the channel fills, and the reader blocks on `send rows → batchCh` until the publisher catches up.
+The channels provide natural backpressure: if Pub/Sub is slow, `pendingCh` fills (capacity `batchSize`), blocking the publisher from sending more entries to the drainer, which in turn blocks `batchCh` from accepting the next batch, which finally blocks the reader's `send rows → batchCh`.
 
-**Error handling**: if any `result.Get()` returns an infrastructure error (e.g. context cancellation, transient Pub/Sub failure), the drainer returns it immediately. The batch `DELETE` is not executed, so all rows in the batch remain in the outbox. Both goroutines exit, the worker restarts, `lastSeenID` resets to 0, and all undeleted rows are re-published. This is correct under at-least-once delivery. User-configuration errors (e.g. deleted topic, missing permissions) are handled inside `publisher.Publish()` and cause `result.Get()` to return nil, so they do not abort the batch.
+**Error handling**: if `fn` returns an error, the publisher goroutine exits immediately, closing `pendingCh`. The drainer exits when `pendingCh` is closed. The reader exits when the context is cancelled (propagated via `errgroup`). No `DELETE` is executed, so all rows in the batch remain in the outbox. On restart, `lastSeenID` resets to 0 and all undeleted rows are re-published. This is correct under at-least-once delivery. User-configuration errors (e.g. deleted topic, missing permissions) are handled inside `publisher.Publish()` and cause `result.Get()` to return nil, so they do not abort the batch.
 
 #### Translating Outbox Rows to S3 Events
 
@@ -194,7 +204,7 @@ The mapping from outbox columns to `ChangeEvent` fields is one-to-one with no en
 | `ChangeEvent` field | `notification.EventRecord` field |
 |---|---|
 | `CommitTimestamp` | `eventTime` |
-| `EventName` | `eventName` (prefixed with `s3:`) |
+| `EventName` | `eventName` |
 | `BucketName` | `s3.bucket.name`, `s3.bucket.arn` |
 | `ProjectID` (resolved to public) | `s3.bucket.ownerIdentity.principalId` |
 | `ObjectKey` | URL-encoded → `s3.object.key` |
@@ -202,11 +212,13 @@ The mapping from outbox columns to `ChangeEvent` fields is one-to-one with no en
 | `StreamID` + `Version` | `NewStreamVersionID(Version, StreamID)` hex-encoded → `s3.object.versionId` |
 | `CommitTimestamp` (Unix nanos) | 16-char uppercase hex → `s3.object.sequencer` |
 
-The `ConvertModsToEvent()` function in `notification.go` is **not used** for the TiDB path — it is Spanner-specific (`spanner.NullJSON`, transaction tag inference) and moves into `SpannerEventSource`.
+The `ConvertModsToEvents()` function (defined in `source_spanner.go`) is **not used** for the TiDB path — it is Spanner-specific (`spanner.NullJSON`, transaction tag inference) and lives in `SpannerEventSource`.
+
+S3 event name and type constants are defined in a new `shared/s3events` package so both the metabase layer (which writes `event_name` to the outbox) and the eventing layer can import them without an import cycle.
 
 #### Impact on the Spanner Path
 
-`changestream.Processor`, `MetadataBatcher`, `bucket_eventing_metadata`, `TransmitEvent`, and `ExcludeTxnFromChangeStreams` are all unchanged. The Spanner backend is wrapped in `SpannerEventSource` which implements the new `EventSource` interface. `partitionDrainer` is moved to the `eventing` package and generalised with a confirmation callback — `SpannerEventSource` passes a watermark-advancing callback, preserving identical behaviour. No external behaviour changes.
+`changestream.Processor`, `MetadataBatcher`, `bucket_eventing_metadata`, `TransmitEvent`, `ExcludeTxnFromChangeStreams`, and `partitionDrainer` are all unchanged. The Spanner backend is wrapped in `SpannerEventSource` which implements the new `EventSource` interface, delegating to the existing `changestream.Processor` and `partitionDrainer` internals. No external behaviour changes.
 
 The `notification.go` dependency on `spanner.NullJSON` and `cloud.google.com/go/spanner` moves into `SpannerEventSource`, keeping it isolated from the shared service logic and from the TiDB path.
 
@@ -258,7 +270,7 @@ The private project ID must never appear in outbox rows written to logs, in even
 
 ### Observability
 
-The two-goroutine pipeline has three potential bottlenecks: the outbox read, the Pub/Sub publish, and the outbox delete. Each should be independently observable.
+The three-goroutine pipeline has three potential bottlenecks: the outbox read, the Pub/Sub publish, and the outbox delete. Each should be independently observable.
 
 **End-to-end lag** — `created_at` of the oldest unprocessed row (`SELECT created_at FROM bucket_eventing_outbox ORDER BY id LIMIT 1`) vs. current time. A growing lag indicates the worker is falling behind regardless of which stage is the bottleneck. Equivalent to the "lagging watermark" metric from the Spanner path.
 
@@ -268,7 +280,7 @@ The two-goroutine pipeline has three potential bottlenecks: the outbox read, the
 
 **Outbox delete latency** — monkit `mon.Task()` on the `DELETE WHERE id IN (...)` call. Spikes here point to TiDB write throughput being the bottleneck.
 
-**Pipeline pressure** — the batch channel capacity between the two goroutines. When the channel is full, the reader is blocked waiting for the publisher to catch up (Pub/Sub or delete is the bottleneck). When the channel is empty, the publisher is blocked waiting for the reader (TiDB read is the bottleneck). Report the current channel fill level as a gauge metric.
+**Pipeline pressure** — `batchCh` fill (0 = publisher bottleneck, 1 = reader bottleneck) and `pendingCh` fill (0 = drainer bottleneck, `batchSize` = publisher bottleneck). Report both as gauge metrics.
 
 ### Test plan
 
@@ -285,14 +297,14 @@ Non-exhaustive test plan:
 
 ### Rollout
 
-The TiDB eventing path is selected automatically based on the configured metabase adapter. The `bucket_eventing_outbox` table is added as a new step in `TiDBAdapter.TiDBMigration()`.
+The TiDB eventing path is selected automatically based on the configured metabase adapter. The `bucket_eventing_outbox` table is part of the initial schema in `TiDBAdapter.TiDBMigration()` (version 1, embedded from `adapter_tidb_scheme.sql`).
 
 Two new fields are added to `eventing.Config` for the TiDB path:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--eventing.tidb-poll-interval` | `100ms` | How long the reader goroutine sleeps when the outbox is empty. |
-| `--eventing.tidb-batch-size` | `100` | Maximum number of outbox rows fetched per SELECT. |
+| `--change-stream.tidb-poll-interval` | `100ms` | How long the reader goroutine sleeps when the outbox is empty. |
+| `--change-stream.tidb-batch-size` | `100` | Maximum number of outbox rows fetched per SELECT. |
 
 ### Rollback
 
