@@ -165,19 +165,35 @@ lapsed.
 
 #### API sketch
 
-Names illustrative. App endpoints run behind the existing OM S3 credential path (no `project_id`/
-`user_id` in the body); console endpoints use the authenticated session.
+Names illustrative. Two callers with different auth: the **OM app** (no interactive login) and the
+**console** (authenticated session). The app only needs create + renew; listing/renaming/revoking
+live on the console, where the user can also revoke a device they no longer have (lost/stolen
+laptop — the key recovery path).
 
 ```text
+# OM app
 POST   /api/v0/om/activations                      create activation + initial lease
-POST   /api/v0/om/activations/{activationID}/lease renew lease (challenge + signature)
-GET    /api/v0/om/activations                       list the user's active devices
-DELETE /api/v0/om/activations/{activationID}        revoke a device, free the seat
+POST   /api/v0/om/activations/{activationID}/lease renew lease
+DELETE /api/v0/om/activations/{activationID}        (optional) self-deactivate on uninstall
 
-GET    /api/v0/om/devices                            console: list the user's OM devices
-PATCH  /api/v0/om/devices/{activationID}             console: update metadata (e.g. name)
-DELETE /api/v0/om/devices/{activationID}             console: revoke a device
+# Console (authenticated session)
+GET    /api/v0/om/devices                  list the user's devices (seats used / available)
+PATCH  /api/v0/om/devices/{activationID}   rename a device
+DELETE /api/v0/om/devices/{activationID}   revoke a device (incl. one no longer in hand)
 ```
+
+**Authentication** is not one mechanism — it differs per endpoint:
+
+- **Create** (`POST /activations`): the existing **S3 credential / access grant** context (the same
+  path the entitlement check uses). Satellite resolves project → owner from the *verified* API key;
+  the body is never trusted for `user_id`/`project_id`. The app also **signs the request with the new
+  device private key**, proving it holds the key for the public key being registered.
+- **Renew / self-deactivate** (`POST .../lease`, `DELETE /activations/{id}`): **device-key
+  challenge–response** — the server verifies a signature against the stored public key, *not* the S3
+  credential. This matches "identity is frozen at activation": renewal keeps working even if the
+  bootstrap credential is later deleted.
+- **Console endpoints**: the normal **console session**, authorized to manage only that user's own
+  activations.
 
 #### Desktop storage & single-instance
 
