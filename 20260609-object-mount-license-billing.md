@@ -5,10 +5,9 @@ tags: ["satellite", "payments", "object-mount", "billing"]
 
 ## Essentials
 
-Object Mount (OM) lets users mount Storj storage as a local drive on their computer. Access is sold
-per "seat" — one seat is one license that allows one account to use Object Mount, billed as a
-monthly subscription. This document describes how seats are priced, billed, prorated, and cancelled,
-and the design decisions behind that billing model.
+Object Mount (OM) lets users mount cloud storage as a local drive. Access is sold per "seat" — one
+seat licenses one account to use OM — billed monthly. This document covers how seats are priced,
+billed, prorated, and cancelled, and how the two tiers are licensed.
 
 ### Header
 
@@ -27,293 +26,235 @@ Informed:
 
 ### Context
 
-Object Mount is moving to a paid, seat-based model. We need a billing design that:
-
-- works for both individual users (1–2 seats) and enterprises (hundreds or thousands of seats),
-- handles mid-period seat additions and cancellations fairly,
-- supports two product tiers (one with included storage, one without),
-- offers a free trial without opening the door to trial abuse,
-- and grants a small number of free seats to drive adoption.
-
-New pricing becomes effective **July 1, 2026**. There are two tiers:
+OM is moving to a paid, seat-based model, effective **July 1, 2026**, with two tiers:
 
 - **Storj OS** — $29/seat/month. Includes 500 GB of free storage per seat per month.
 - **Any Cloud** — $39/seat/month. No included storage.
 
+Both are **billed** per seat through Stripe, but they are **licensed differently**, because the app
+only reaches Storj for Storj OS:
+
+- **Storj OS** mounts Storj buckets — the app is on the Storj data path. Licensing is an enforced
+  satellite-side **entitlement** (the seat-count model below); device-level enforcement is layered
+  on separately (device binding).
+- **Any Cloud** mounts third-party clouds (AWS, GCP, MinIO, …) with Storj nowhere on the data path.
+  Licensing is a self-contained **offline cunoFS key** imported into the app; the satellite is never
+  contacted at mount time. Seats are a **billing quantity only** — not technically enforced.
+
 ### Goals
 
-- Bill OM seats per customer with a single invoice per tier, regardless of seat count.
-- Charge fairly for mid-period seat additions (prorated) and avoid giving seats away for free.
-- Let customers who cancel keep access through the period they have already paid for.
-- Grant included storage for the Storj OS tier in a way that is predictable and abuse-resistant.
-- Offer an Any Cloud free trial that cannot be chained indefinitely across accounts.
-- Grant every user 2 free OM seats automatically.
+- One invoice per customer per tier, regardless of seat count.
+- Charge fairly for mid-period additions (prorated); keep access through the paid period on
+  cancellation.
+- Predictable, abuse-resistant included storage for Storj OS.
+- An Any Cloud free trial that cannot be chained across accounts.
+- 2 free seats per user, granted automatically.
+- Self-serve purchase of either tier in the UI, no admin in the loop.
+- OM remains **usable with no internet** (e.g. an AWS VPC with no egress), even if licensing is
+  delivered manually — the Any Cloud key must work fully offline.
 
 ### Approach / Design
 
-#### One subscription per tier, seat count as quantity
+#### Billing: one subscription per tier, seats as quantity
 
-Each customer has a single Stripe subscription per product tier. Adding seats increases the
-`quantity` on that subscription rather than creating a new subscription. A customer with 1000 seats
-therefore receives **one** invoice and **one** email per month, not 1000.
+Each customer has one Stripe subscription per tier; adding seats raises its `quantity` rather than
+creating new subscriptions. So a 1000-seat customer gets one invoice, not 1000.
 
-#### Adding seats mid-period (prorated, charged immediately)
+- **Adding seats** mid-period is charged immediately, prorated for the remaining days (no free seats
+  between the add and the next renewal). *E.g. renewal on the 3rd, add a seat on the 21st with 13
+  days left → ~\$12 now, then $29 at renewal.*
+- **Cancelling seats** keeps access until the end of the paid period; no refund. The count drops at
+  the next boundary.
 
-When a customer adds seats mid-period, they are charged immediately for the remaining days of the
-current billing period. The customer only pays for the time they actually use, and Storj does not
-give seats away for free between the add date and the next renewal.
+#### Storj OS entitlement: seat changes over time
 
-> *Example: subscription renews on the 3rd of each month. Customer adds a seat on July 21st (13 days
-> left in the period). They pay approximately \$12 immediately, then $29 at the next renewal.*
+Storj OS access is enforced satellite-side. Seat entitlement is stored per user as a list of
+`AccountLicense` rows (`Type` `OM`, `ProductID`, `Count`, validity). The active seat count at any
+instant `T` is the **sum of `Count` over rows whose validity interval contains `T`** (device binding
+later subtracts active devices from this).
 
-#### Cancelling seats (access until period end, no refund)
+A license today has only an **end** boundary (`ExpiresAt`/`RevokedAt`), which can express "active
+now, ends later" but not "recorded now, effective later" — exactly what a deferred change needs. We
+add a **`StartsAt`** boundary so each row is a half-open interval `[StartsAt, ExpiresAt)`, counted
+only while `T` is inside it.
 
-When a customer cancels seats, they keep access until the end of the billing period they have
-already paid for. No refund is issued. At the end of the period the seat count drops to the new
-lower number, and future invoices reflect the reduced count.
+Every change is a **close-and-open**, never an in-place edit of `Count`, so past values survive as
+history:
 
-The seat-count transition is tracked precisely in our system so the invoicing process always sees
-the correct seat count for any given point in time — both historically and going forward.
+- **Increase** (immediate, prorated): close the active row at *now*, open a higher-count row at
+  `StartsAt = now`.
+- **Decrease** (deferred): cap the active row at the period end, open a lower-count row at
+  `StartsAt = period end` — stored now, dormant until the boundary.
 
-#### How seat changes are represented over time
+Because intervals carry both a start and an end, they never overlap in counting, so a query for any
+instant — past or present — returns the right number, and the interval sequence *is* the history:
 
-Seat entitlement is stored per user as a list of license entries (see the entitlements service —
-`AccountLicense`), each carrying a `Type` (`OM`), a `ProductID` (Storj OS vs Any Cloud), a seat
-`Count`, and a validity window. The active seat count for a tier at any instant `T` is the **sum of
-`Count` over the licenses whose validity window contains `T`** (device-level seat enforcement, which
-subtracts active devices from this number, is designed separately).
+> *Drop 3 → 2 on Jun 9 (period ends Jun 30): stored `{3, [.., Jul 1)}` + `{2, [Jul 1, ..)}`.
+> Jun 15 → 3, Jul 2 → 2 — never 5. Then increase 2 → 4 on Jul 5: a Jun-15 query still returns 3.*
 
-A license today has only an **end** boundary (`ExpiresAt` / `RevokedAt`). That is enough to express
-"active now, ends later", but it cannot express "recorded now, takes effect later" — and that
-distinction is exactly what a deferred seat change needs. We therefore add a **`StartsAt` /
-`EffectiveFrom`** boundary so each license describes a half-open interval `[StartsAt, ExpiresAt)`. A
-license is counted only while `T` falls inside its interval.
-
-A seat change is **never an in-place edit of an existing interval's `Count`**. It always *closes the
-current interval and opens a new one* (a "close-and-open"), so the previous count survives as
-history. The only difference between the two directions is where the new interval starts and whether
-it charges:
-
-- **Increasing seats (immediate, prorated).** Close the active row at *now* and open a new,
-  higher-count row with `StartsAt = now`. The customer gets the new seats immediately, matching the
-  prorated charge.
-- **Decreasing seats (deferred to period end).** Cap the current row at the period boundary
-  (`ExpiresAt = period end`) and record a new, lower-count row with `StartsAt = period end`. The
-  lower count is stored *now* but is dormant until the boundary, so it is never counted early.
-
-Because each interval has both a start and an end, intervals never overlap in *counting* even when
-several exist in storage at once — the system reports the correct number at any instant, historically
-and going forward, with no double-counting.
-
-##### Point-in-time history
-
-Because a change closes one interval and opens another rather than overwriting a count, the sequence
-of `[StartsAt, ExpiresAt)` intervals *is* the seat-count history. A query for any instant returns the
-count of the interval covering it.
-
-> *Example: customer has 3 seats from June 1, then increases to 4 on June 9.*
-> *Stored: `{Count: 3, [Jun 1, Jun 9)}` and `{Count: 4, [Jun 9, ...)}`.*
-> *Queried on June 1 → still **3**. Queried now → **4**.* If we had instead bumped the existing
-> row's `Count` from 3 to 4 in place, the June 1 query would wrongly read 4 — the original value
-> would be gone.
-
-This is why an increase must split the interval rather than mutate `Count`: included storage and any
-other point-in-time question depend on the past value remaining queryable.
-
-A consequence: a row may be safely **collapsed or deleted only while its interval has never been
-live** — e.g. a pending decrease that is reversed before its boundary never applied to any real time,
-so dropping it loses nothing. An interval that has already been in effect is real history and must
-never be deleted or rewritten.
-
-> *Example: period ends June 30 (renews July 1); customer drops 3 → 2 on June 9.*
-> *Stored from June 9 onward:*
-> *`{Count: 3, [..., Jul 1)}` and `{Count: 2, [Jul 1, ...)}`.*
-> *Queried on June 15 → only the first interval contains the date → **3 seats**.*
-> *Queried on July 2 → only the second → **2 seats**. Never 5.*
-
-Without the `StartsAt` boundary, the lower-count row would be active the moment it is inserted and
-would be summed on top of the still-active higher-count row — a customer dropping 3 → 2 would
-transiently read **5** seats until the old row expired. The alternative of *not* pre-recording the
-change (creating the lower-count row only at the boundary, via the billing chore) avoids the extra
-field but loses the "going forward" auditability; see Alternatives considered.
+Two consequences: without `StartsAt`, the lower row would count immediately and a 3 → 2 drop would
+transiently read **5**; and a row may be deleted/collapsed **only while its interval was never live**
+(e.g. a pending decrease reversed before its boundary) — an interval that has been in effect is
+history and must not be rewritten.
 
 #### Included storage (Storj OS only)
 
-Each active Storj OS seat includes 500 GB of free storage per month (3 seats → 1.5 TB, 10 seats →
-5 TB).
+Each active Storj OS seat includes 500 GB/month, fixed at the **start of the calendar month**
+(midnight UTC on the 1st); mid-month changes don't affect that month. This needs no separate
+snapshot — it's just a point-in-time query of the intervals above as of the 1st.
 
-Included storage is calculated from the number of seats the customer has at the **start of the
-calendar month** (midnight UTC on the 1st). Seats added or cancelled during the month do not change
-the included storage for that month.
+> *3 seats on Aug 1, +2 on Aug 15 → August stays 1.5 TB; September (5 seats) → 2.5 TB.*
 
-Thanks to the interval model above, this needs no separate stored snapshot: the start-of-month seat
-count is just a point-in-time query of the entitlement intervals as of midnight UTC on the 1st. A
-mid-month increase opens a new interval starting later in the month, so it does not affect the value
-the 1st-of-month query returns.
+Edge case: a first seat bought mid-month gets no included storage that month (no interval covers the
+1st → count 0). Communicate this clearly in the UI.
 
-> *Example: customer has 3 seats on August 1st and adds 2 more on August 15th. Their included
-> storage for August is 1.5 TB (based on the 3 seats at the start of the month). From September 1st,
-> with 5 seats, they get 2.5 TB.*
+#### Free trial (Any Cloud) and free seats
 
-New-customer edge case: a customer who buys their first seat on July 15th receives no included
-storage for July, because no interval covers July 1st (the 1st-of-month query returns zero seats).
-Their included storage begins on August 1st. This must be communicated clearly in the product UI so
-customers are not surprised.
+- **Free trial**: not charged during the trial; billing starts automatically at trial end. **A card
+  is required** (otherwise trials chain indefinitely across accounts). Cancelling during the trial
+  ends access immediately with no charge.
+- **Free seats**: every user gets 2, automatically on signup; existing users via a one-time bulk
+  grant on July 1, 2026. They grant OM access only — no included storage.
 
-#### Free trial (Any Cloud)
+#### Any Cloud licensing (offline cunoFS key)
 
-The Any Cloud tier includes a free trial during which the customer is not charged. When the trial
-ends, billing starts automatically. **A credit card is required to start the trial** — without it,
-someone could create unlimited accounts to chain free trials together. If the customer cancels
-during the trial, access ends immediately and no charge is made.
+Any Cloud is **decoupled from the seat-enforcement machinery** above. The app is gated by a
+self-contained **cunoFS license key** validated **offline**; the satellite is never contacted at
+mount time, so a "seat" here is a billing quantity, not an enforced limit.
 
-#### Free seats
+**What the key is** (from `storj/cunofs-keygen`, backed by `storj/cunofs-licensing`): a base64 blob
+of version, `license_type` (`personal`/`pro`/`ent`/`*_eval`/`edu_*`), a UUID, start, expiry, and a
+64-bit feature bitmask, plus an **RSA-PSS/SHA-256 signature**. The OM client verifies it against an
+embedded RSA public key (separate signing keys per platform) and writes it locally. The format is
+dictated by the cunoFS engine, so we **generate** it — replacing it isn't an option.
 
-Every user receives 2 free Object Mount seats, granted automatically on account creation. Existing
-users receive them via a one-time bulk grant on July 1, 2026 (the new-pricing effective date). Free
-seats grant Object Mount access only — they do **not** include any free storage.
+**Issuing it (self-serve)**: today `cunofs-keygen` produces the key out of band (offline with the
+RSA private key, or an AWS Lambda `GenerateLicense2` that holds it) and an admin hands it into the
+grant API, which stores it; the user obtains it and imports it. For self-serve, the satellite mints
+it inline on purchase (vendor `cunofs-keygen`/`cunofs-licensing`, or a small signing service),
+mapping the tier/term to `license_type`/validity/features (trial → `*_eval`). The user then
+**downloads it from the UI and imports it** — the import step is unchanged. We vendor
+`cunofs-keygen` in the satellite and supply the RSA signing key (per platform) through **config that
+defaults empty**: the keys live in **OpenBao** and infra populates the config at deploy time, so
+self-serve Any Cloud minting stays off until the secret is present. The admin "supply a `Key`" path
+can stay for backwards compatibility.
 
-#### License key issuance (legacy mechanism for Any Cloud)
+**Offline / air-gapped (supported)**: the key is generated once, **delivered manually** if needed,
+and validated offline forever after (cunoFS supports perpetual expiry). Any online mechanism (key
+refresh, future enforcement) must stay **optional** so disconnected deployments still work.
 
-The signed license `Key` on an OM license is a **legacy licensing mechanism that predates
-entitlements**. It is how the OM desktop app authorizes access to **any S3 cloud other than Storj**
-(the Any Cloud tier): for those backends Storj is nowhere on the data path, so this key — not a
-Storj credential — is the licensing anchor. It is still how Any Cloud works today.
-
-This key is **not generated by the satellite**. It is produced outside the satellite (in the OM
-backend) and handed in: the admin grant API accepts a `Key`, and the satellite simply stores it on
-the license and passes it back to the app on request. That works today because granting such a
-license goes through an admin / back-office step where the externally-generated key can be supplied.
-
-Self-serve, automatic granting removes that step. When a user buys (or is auto-granted) an Any Cloud
-seat directly, there is no admin in the loop to supply a key. So either the legacy key-generation
-and signing logic moves from the OM backend into the satellite (or a service the satellite calls) so
-it can run inline on the self-serve grant path, or the Any Cloud flow is reworked so it no longer
-depends on the legacy key. Whichever we choose:
-
-- The signing secret/material the key depends on must be available to the satellite and managed
-  accordingly (see Security / Privacy).
-- The admin "supply a `Key`" path can remain for backwards compatibility, but the self-serve path
-  must not depend on a human supplying the key.
-
-The exact key format and signing scheme are owned by the OM backend today; porting them (or
-replacing them for self-serve) is a prerequisite for self-serve Any Cloud licensing and should be
-scoped with that team.
+**Enforcement limits**: a customer holds a **single key**, not one per seat — it encodes no seat or
+device count, so changing seats never generates or modifies a key (it's reissued only on
+renewal/expiry or a feature change). The key is a **bearer token** (no embedded identity): usable on
+any number of machines until expiry, and not revocable (validated locally). So Any Cloud seat count
+is **purely contractual**, enforced by issuance + expiry + contract — short expiries with reissue for
+connected customers, long/perpetual keys for air-gapped ones (where there is effectively no technical
+enforcement, by design).
 
 #### Summary of key decisions
 
 | Decision | Reason |
 |---|---|
-| One subscription per tier, quantity for seat count | Avoids generating hundreds of invoices for enterprise customers |
-| Charge immediately (prorated) when adding seats | Fair to both sides; prevents getting seats for free |
-| No refund on cancellation, access until period end | Simplicity; customer loses no value |
-| Included storage based on seat count at month start | Prevents abuse; simple and predictable |
-| Credit card required for free trial | Prevents unlimited trial abuse via multiple accounts |
-| 2 free seats for all users, no included storage | Encourages adoption without giving away storage credits |
-| Time-bounded license intervals (`[StartsAt, ExpiresAt)`) | Correct seat count at any instant; no double-counting on deferred decreases |
-| Self-serve Any Cloud must produce the legacy license key without an admin | The license key is a pre-entitlements mechanism for non-Storj S3 access, currently supplied by hand via the admin grant path |
+| One subscription per tier, quantity for seats | One invoice for enterprise customers |
+| Prorated immediate charge when adding seats | Fair both ways; no free seats |
+| No refund on cancellation, access to period end | Simplicity; no value lost |
+| Included storage fixed at month start | Prevents end-of-month abuse; predictable |
+| Card required for free trial | Prevents chained trials across accounts |
+| 2 free seats, no included storage | Adoption without giving away storage |
+| Time-bounded intervals (`[StartsAt, ExpiresAt)`) | Correct count at any instant; clean history |
+| Any Cloud: satellite mints the cunoFS key for self-serve | No admin in the loop; format dictated by cunoFS |
+| Any Cloud decoupled from seat enforcement; offline + single key | Validated offline, no satellite contact, must work air-gapped |
+| cunoFS signing keys in OpenBao, injected via empty-default config | Keys never committed; feature off until infra populates; rotation owned by infra |
 
 ## Disclaimers
 
 ### Anti-goals
 
-- **No mid-month proration on cancellation.** Partial refunds require day-level credit calculations
-  and partial invoices, adding significant complexity for both the billing system and the customer
-  reading their invoice. Since the customer retains full access through the period they paid for, no
-  value is lost — the simplicity trade-off is worth it.
-- **No mid-month increase of included storage.** Allowing mid-month seat additions to immediately
-  increase included storage creates an abuse opportunity: a customer could add many seats on the
-  last day of the month, gain a large storage credit for the entire month at a fraction of the cost,
-  then cancel immediately. Locking the calculation to the start of the month eliminates this.
+- **No proration/refund on cancellation.** Day-level credits add system and invoice complexity for
+  no lost value (access runs to period end).
+- **No mid-month increase of included storage.** Otherwise a customer could add seats on the last
+  day, claim a full month of storage cheaply, then cancel. Month-start locking removes this.
+- **No technical seat/device enforcement for Any Cloud.** Offline validation (and the air-gap
+  requirement) make it impossible; closing the gap would mean making the app online. Accepted.
+- **We don't prevent an Any Cloud key from being used to mount Storj.** A cunoFS key unlocks the
+  *engine*, not a backend — "Storj OS" / "Any Cloud" are Storj's billing tiers, invisible to cunoFS.
+  So one offline Any Cloud key can run OM against Storj (e.g. via Storj's S3 gateway, which looks
+  like any S3 endpoint) on unlimited machines, bypassing Storj OS seats and device binding. This is
+  inherent to the offline bearer-token model and not fixable client-side; pricing/packaging and the
+  cunoFS question below are the only levers.
 
 ### Alternatives considered
 
-- **One subscription per seat.** Rejected: an enterprise with 1000 seats would receive 1000 invoices
-  and emails per month. Quantity-on-a-single-subscription gives the same revenue with one invoice.
-- **Proration / partial refunds on cancellation.** Rejected for the complexity reasons above; the
-  customer keeps access for the paid period instead.
-- **Free trial without a credit card.** Rejected: trivially abused by creating new accounts to chain
-  trials indefinitely.
-- **Mutating seat count in place at the period boundary (no `StartsAt` field).** Instead of
-  pre-recording the lower count, keep a single license row and let the billing chore change its
-  `Count` at the period rollover. This avoids the schema change and cannot double-count, but it does
-  not record the upcoming change ahead of time, so the system cannot answer "what will this
-  customer's seat count be next period" from stored state — it loses the "going forward"
-  auditability. Rejected in favor of the time-bounded interval model.
+- **One subscription per seat** — rejected: 1000 invoices for a 1000-seat customer.
+- **Proration/refunds on cancellation** — rejected for complexity; access-to-period-end instead.
+- **Free trial without a card** — rejected: trivially chained across accounts.
+- **In-place `Count` edit at the boundary (no `StartsAt`)** — avoids a schema field and can't
+  double-count, but can't pre-record the next-period count, losing "going forward" auditability.
+- **Forcing Any Cloud online (entitlement + device binding)** — contradicts the offline import flow
+  and breaks no-internet VPCs. Any Cloud stays offline.
+- **Mandatory short-lived keys with online refresh for Any Cloud** — enables some enforcement but
+  breaks air-gap; kept as an optional path for connected customers only.
 
 ### Open question
 
-- How should an existing Object Mount customer be migrated onto the new pricing on July 1, 2026 —
-  in particular, how are their existing seats and any in-flight billing reconciled with the bulk
-  free-seat grant?
-- Should included storage that goes unused in a month be visibly surfaced to the customer, or only
-  reflected silently in the invoice?
-- The active-license conflict check currently keys on `Type` + `PublicID` + `BucketName` and ignores
-  `ProductID`. For account-level OM licenses both tiers share an empty scope, so a customer holding
-  both a Storj OS and an Any Cloud seat would collide. Does the conflict check need to include
-  `ProductID` before per-tier seats ship?
-- Where should the license-key signing material live, and who owns key rotation once generation moves
-  into the satellite?
+- Migrating existing OM customers onto the new pricing on July 1, 2026 — reconciling existing seats
+  and in-flight billing with the bulk free-seat grant.
+- Should unused included storage be surfaced to the customer, or only reflected in the invoice?
+- The active-license conflict check keys on `Type`+`PublicID`+`BucketName` and ignores `ProductID`;
+  account-level OM licenses for both tiers share an empty scope and would collide. Include
+  `ProductID`?
+- Any Cloud uses a single key per customer (decided). Residual: how do support/audit reconcile billed
+  seats against usage, given the app never reports the key back?
+- **cunoFS ask:** can a key be scoped by **backend type** (and can the engine identify Storj
+  endpoints) so an Any Cloud key can be minted *without* the ability to mount Storj? If yes, it
+  closes the casual cross-tier leak (an Any Cloud key substituting for Storj OS seats); if no, that
+  leak is an accepted limitation. One for Nikos's team.
 
 ## Reminders
 
 ### Security / Privacy
 
-- Credit-card collection for the free trial goes through Stripe; no raw card data is stored on our
-  side.
-- Seat grants and cancellations must be authorized as the account owner.
-- Moving license-key generation into the satellite brings the signing secret/material into satellite
-  scope. It must be stored securely (e.g. via the existing secret-management path), access-controlled,
-  and rotatable without invalidating still-valid leases mid-period.
+- Trial card collection goes through Stripe; no raw card data stored here.
+- Seat grants/cancellations must be authorized as the account owner.
+- The cunoFS RSA signing keys live in **OpenBao** and reach the satellite via config that defaults
+  empty (feature off until infra populates it) — keys are never committed. Rotation is an infra
+  operation in OpenBao + redeploy, done only in lockstep with the client's embedded public key.
+- A cunoFS key is a bearer token: prefer short expiries with reissue for connected customers.
+  Air-gapped customers get long/perpetual keys, safeguarded only by issuance + contract.
 
 ### Observability
 
-- Track seat additions, cancellations, and the resulting prorated charges per customer.
-- Track free-seat grants (per-account on signup, and the July 1, 2026 bulk grant as a one-time job
-  with a count of accounts affected).
-- Track free-trial starts, conversions, and cancellations.
-- Surface the start-of-month seat snapshot used for included-storage calculation, for auditability.
+- Track seat add/cancel events and resulting prorated charges.
+- Track free-seat grants (per-signup and the July 1, 2026 bulk job, with affected-account count).
+- Track free-trial starts, conversions, cancellations.
 
 ### Test plan
 
-Tests should confirm:
-
-- A customer with N seats has one subscription per tier with `quantity = N`, and receives one
-  invoice per period.
-- Adding seats mid-period produces an immediate prorated charge for the remaining days.
-- Cancelling seats keeps access through the paid period, issues no refund, and reduces the seat
-  count only at the next period boundary.
-- Included storage equals 500 GB × (seats at midnight UTC on the 1st) and does not change for
-  mid-month additions/cancellations.
-- A first seat bought mid-month yields zero included storage that month.
-- The free trial requires a card, starts billing automatically at trial end, and ends immediately
-  with no charge on cancellation during the trial.
-- Every new account is granted 2 free seats with no included storage; the bulk grant applies once
-  to existing users.
-- The active seat count at an instant equals the sum of `Count` over licenses whose
-  `[StartsAt, ExpiresAt)` interval contains that instant: a 3 → 2 decrease reads 3 before the period
-  boundary and 2 after, never 5; a mid-period increase reads the higher count immediately.
-- A mid-month increase (3 → 4 on the 9th) preserves history: a query as of the 1st still returns 3
-  (and so included storage for the month is unchanged), while a query for "now" returns 4.
-- A self-serve Any Cloud grant produces a valid legacy license key without any externally-supplied
-  key (whether by the satellite generating it or by a reworked flow), and the key is accepted by the
-  OM desktop app for non-Storj S3 access.
+- N seats → one subscription per tier with `quantity = N`, one invoice per period.
+- Mid-period add → immediate prorated charge; cancel → access to period end, no refund, count drops
+  only at the boundary.
+- Active count = sum of `Count` over intervals covering the instant: 3 → 2 reads 3 then 2 (never 5);
+  a mid-month 3 → 4 still returns 3 for a 1st-of-month query (included storage unchanged) and 4 for
+  "now".
+- Included storage = 500 GB × (seats at the 1st); a first seat bought mid-month gets none that month.
+- Free trial requires a card, auto-bills at trial end, ends with no charge if cancelled in-trial.
+- Every new account gets 2 free seats (no storage); bulk grant applies once to existing users.
+- A self-serve Any Cloud purchase mints a valid cunoFS key (correct `license_type`/validity/features)
+  that verifies against the client's embedded public key; it imports and works with **no network**;
+  and a later downgrade does **not** invalidate an already-issued key (no clawback).
 
 ### Rollout
 
-- New pricing and the bulk free-seat grant become effective July 1, 2026.
-- The 2-free-seat grant for new accounts ships ahead of the effective date so signups are correct
-  from day one.
+- New pricing and the bulk free-seat grant are effective July 1, 2026; the per-signup 2-free-seat
+  grant ships ahead of that date.
 
 ### Rollback
 
-- If billing issues arise, new seat purchases and trials can be gated behind a feature flag while
-  existing subscriptions continue unchanged.
+- New seat purchases and trials can be gated behind a feature flag while existing subscriptions
+  continue unchanged.
 
 ## Out of scope
 
-- **Per-seat assignment (device/credential binding).** Today seats are account-level — any use of
-  Object Mount on the account consumes from the seat pool. Binding individual seats to specific
-  devices or credentials so a company can control exactly which machines are authorised is planned
-  for a later phase. The billing model described here is designed to support it without changes.
-- Minimum-retention exemption rules for Object Mount storage.
+- **Per-seat device/credential binding** (Storj OS) — planned for a later phase; this billing model
+  supports it without changes.
+- Minimum-retention exemption rules for OM storage.
